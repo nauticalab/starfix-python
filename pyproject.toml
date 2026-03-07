@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "starfix"
+version = "0.0.2"
+description = "Pure-Python implementation of starfix Arrow logical hasher"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+authors = [{ name = "nauticalab" }]
+keywords = ["arrow", "hashing"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
+dependencies = ["pyarrow>=14.0.0"]
+
+[dependency-groups]
+dev = ["pytest>=9.0.2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/starfix"]
