@@ -22,6 +22,7 @@ class TestSchemaSerialization:
         # Keys must be sorted: age before name
         assert s.index('"age"') < s.index('"name"')
         assert '"data_type":"Int32"' in s
+        assert '"data_type":"LargeUtf8"' in s
         assert '"nullable":false' in s
 
     def test_time_types_in_schema(self):
@@ -92,12 +93,12 @@ class TestArrayHashing:
     def test_binary_array(self):
         arr = pa.array([b"hello", None, b"world", b""], type=pa.binary())
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "000001c73893c594350c05117a934571e7a480693447a319e269b36fa03c470383f2be"
+        assert h == "000001331f179fa074a02afbb060d5f38e776fb63d69494650934bafa51f6d5264f576"
 
     def test_string_array(self):
         arr = pa.array(["hello", None, "world", ""], type=pa.utf8())
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "00000150f4ed059207a4606f71b278be3dd53869c65a22549d900f90c35da4df5c309e"
+        assert h == "0000017d2325032dd496c5ccbce50ea6afd7edf8e10d0f1695a5b35d1e8f3759b1b3e6"
 
     def test_list_array(self):
         arr = pa.array(
@@ -105,7 +106,7 @@ class TestArrayHashing:
             type=pa.list_(pa.field("item", pa.int32(), nullable=True)),
         )
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "00000105fc3ecc3e20fea732e2a4bedbbd58ab40b5d1f19ca324b5f3d8116b21c0d649"
+        assert h == "00000186ba22789af5e728982c0ed5c78dcc382e8cc9124bcdbd794638ee05a79f6796"
 
     def test_decimal128_array(self):
         from decimal import Decimal
@@ -122,6 +123,50 @@ class TestArrayHashing:
         )
         h = ArrowDigester.hash_array(arr).hex()
         assert h == "0000011e3b33d28771b3593fd5dc4b68af8091a1ba9cd493ade374e7368e213bef244e"
+
+
+# ── Type normalization ────────────────────────────────────────────────
+
+
+class TestTypeNormalization:
+    def test_utf8_equals_large_utf8_array(self):
+        a = pa.array(["hello", None, "world"], type=pa.utf8())
+        b = pa.array(["hello", None, "world"], type=pa.large_utf8())
+        assert ArrowDigester.hash_array(a) == ArrowDigester.hash_array(b)
+
+    def test_binary_equals_large_binary_array(self):
+        a = pa.array([b"hello", None, b"world"], type=pa.binary())
+        b = pa.array([b"hello", None, b"world"], type=pa.large_binary())
+        assert ArrowDigester.hash_array(a) == ArrowDigester.hash_array(b)
+
+    def test_list_equals_large_list_array(self):
+        lt = pa.list_(pa.field("item", pa.int32(), nullable=True))
+        llt = pa.large_list(pa.field("item", pa.int32(), nullable=True))
+        a = pa.array([[1, 2], None, [3]], type=lt)
+        b = pa.array([[1, 2], None, [3]], type=llt)
+        assert ArrowDigester.hash_array(a) == ArrowDigester.hash_array(b)
+
+    def test_schema_utf8_equals_large_utf8(self):
+        s1 = pa.schema([pa.field("name", pa.utf8(), nullable=True)])
+        s2 = pa.schema([pa.field("name", pa.large_utf8(), nullable=True)])
+        assert ArrowDigester.hash_schema(s1) == ArrowDigester.hash_schema(s2)
+
+    def test_schema_binary_equals_large_binary(self):
+        s1 = pa.schema([pa.field("data", pa.binary(), nullable=True)])
+        s2 = pa.schema([pa.field("data", pa.large_binary(), nullable=True)])
+        assert ArrowDigester.hash_schema(s1) == ArrowDigester.hash_schema(s2)
+
+    def test_schema_list_equals_large_list(self):
+        s1 = pa.schema([pa.field("items", pa.list_(pa.field("item", pa.int32(), nullable=True)), nullable=True)])
+        s2 = pa.schema([pa.field("items", pa.large_list(pa.field("item", pa.int32(), nullable=True)), nullable=True)])
+        assert ArrowDigester.hash_schema(s1) == ArrowDigester.hash_schema(s2)
+
+    def test_record_batch_utf8_equals_large_utf8(self):
+        s1 = pa.schema([pa.field("name", pa.utf8(), nullable=True)])
+        s2 = pa.schema([pa.field("name", pa.large_utf8(), nullable=True)])
+        b1 = pa.RecordBatch.from_arrays([pa.array(["a", "b"], type=pa.utf8())], schema=s1)
+        b2 = pa.RecordBatch.from_arrays([pa.array(["a", "b"], type=pa.large_utf8())], schema=s2)
+        assert ArrowDigester.hash_record_batch(b1) == ArrowDigester.hash_record_batch(b2)
 
 
 # ── Collision resistance ──────────────────────────────────────────────

@@ -68,8 +68,7 @@ def _data_type_to_value(dt: pa.DataType) -> object:
         fields_json = [_inner_field_to_value(dt.field(i)) for i in range(dt.num_fields)]
         return {"Struct": fields_json}
     if pa.types.is_list(dt) or pa.types.is_large_list(dt):
-        tag = "LargeList" if pa.types.is_large_list(dt) else "List"
-        return {tag: _inner_field_to_value(dt.value_field)}
+        return {"LargeList": _inner_field_to_value(dt.value_field)}
     if pa.types.is_fixed_size_list(dt):
         return {"FixedSizeList": [_inner_field_to_value(dt.value_field), dt.list_size]}
     if pa.types.is_map(dt):
@@ -99,9 +98,9 @@ def _primitive_data_type_string(dt: pa.DataType) -> object:
         pa.float64(): "Float64",
         pa.date32(): "Date32",
         pa.date64(): "Date64",
-        pa.utf8(): "Utf8",
+        pa.utf8(): "LargeUtf8",
         pa.large_utf8(): "LargeUtf8",
-        pa.binary(): "Binary",
+        pa.binary(): "LargeBinary",
         pa.large_binary(): "LargeBinary",
     }
     if dt in _simple:
@@ -179,9 +178,7 @@ def _raw_serde_data_type(dt) -> object:
 
     if pa.types.is_struct(dt):
         return {"Struct": [_raw_serde_field(dt.field(i)) for i in range(dt.num_fields)]}
-    if pa.types.is_list(dt):
-        return {"List": _raw_serde_field(dt.value_field)}
-    if pa.types.is_large_list(dt):
+    if pa.types.is_list(dt) or pa.types.is_large_list(dt):
         return {"LargeList": _raw_serde_field(dt.value_field)}
     if pa.types.is_fixed_size_list(dt):
         return {"FixedSizeList": [_raw_serde_field(dt.value_field), dt.list_size]}
