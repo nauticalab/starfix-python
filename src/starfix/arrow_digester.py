@@ -16,11 +16,10 @@ if TYPE_CHECKING:
 
 VERSION_BYTES = b"\x00\x00\x01"
 DELIMITER = "/"
-NULL_BYTES = b"NULL"
 
 
 # ---------------------------------------------------------------------------
-# Bit-vector helper (MSB-first packing, matching bitvec<u8, Msb0>)
+# Bit-vector helper (LSB-first packing, matching bitvec<u8, Lsb0>)
 # ---------------------------------------------------------------------------
 
 class _BitVec:
@@ -55,24 +54,39 @@ class _BitVec:
         return bytes(self._bytes)
 
 
+def _is_list_type(dt: pa.DataType) -> bool:
+    import pyarrow as pa
+    return pa.types.is_list(dt) or pa.types.is_large_list(dt)
+
+
 # ---------------------------------------------------------------------------
 # Schema / DataType serialization  (matches Rust `serialized_schema`)
 # ---------------------------------------------------------------------------
 
 def _data_type_to_value(dt: pa.DataType) -> object:
     """Convert a pyarrow DataType to the JSON-compatible value that matches
-    the Rust ``data_type_to_value`` output."""
+    the Rust ``data_type_to_value`` output.
+
+    Types are normalized: Utf8→LargeUtf8, Binary→LargeBinary, List→LargeList,
+    Dictionary→value_type. Struct fields are sorted alphabetically.
+    """
     import pyarrow as pa
 
+    # Normalize: Dictionary → recurse on value type
+    if pa.types.is_dictionary(dt):
+        return _data_type_to_value(dt.value_type)
+
     if pa.types.is_struct(dt):
-        fields_json = [_inner_field_to_value(dt.field(i)) for i in range(dt.num_fields)]
+        # Sort struct fields alphabetically by name
+        fields = [dt.field(i) for i in range(dt.num_fields)]
+        fields.sort(key=lambda f: f.name)
+        fields_json = [_inner_field_to_value(f) for f in fields]
         return {"Struct": fields_json}
     if pa.types.is_list(dt) or pa.types.is_large_list(dt):
-        return {"LargeList": _inner_field_to_value(dt.value_field)}
+        return {"LargeList": _element_type_to_value(dt.value_field)}
     if pa.types.is_fixed_size_list(dt):
-        return {"FixedSizeList": [_inner_field_to_value(dt.value_field), dt.list_size]}
+        return {"FixedSizeList": [_element_type_to_value(dt.value_field), dt.list_size]}
     if pa.types.is_map(dt):
-        # pa.map_ stores a struct child called "entries"
         return {"Map": [_inner_field_to_value(dt.key_field.with_name("entries")), False]}
 
     # Primitive / leaf types – must match Arrow-Rust serde
@@ -141,6 +155,7 @@ def _primitive_data_type_string(dt: pa.DataType) -> object:
 
 
 def _inner_field_to_value(field: pa.Field) -> dict:
+    """Convert a field to JSON with name, data_type, and nullable."""
     return {
         "name": field.name,
         "data_type": _data_type_to_value(field.type),
@@ -148,44 +163,15 @@ def _inner_field_to_value(field: pa.Field) -> dict:
     }
 
 
-def _raw_serde_field(field) -> dict:
-    """Produce the full arrow-rs serde Field representation (used in hash_array).
+def _element_type_to_value(field: pa.Field) -> dict:
+    """Convert a container element field to JSON with only data_type and nullable (no name).
 
-    Arrow-rs Field serializes all struct fields in declaration order:
-    name, data_type, nullable, dict_id, dict_is_ordered, metadata
+    Used for list and fixed-size list element types, matching Rust ``element_type_to_value``.
     """
-    result = OrderedDict()
-    result["name"] = field.name
-    result["data_type"] = _raw_serde_data_type(field.type)
-    result["nullable"] = field.nullable
-    result["dict_id"] = 0
-    result["dict_is_ordered"] = False
-    if field.metadata:
-        result["metadata"] = {k.decode() if isinstance(k, bytes) else k:
-                              v.decode() if isinstance(v, bytes) else v
-                              for k, v in field.metadata.items()}
-    else:
-        result["metadata"] = {}
-    return result
-
-
-def _raw_serde_data_type(dt) -> object:
-    """Produce the arrow-rs serde DataType representation (used in hash_array).
-
-    This matches serde_json::to_string(&data_type) in Rust exactly.
-    """
-    import pyarrow as pa
-
-    if pa.types.is_struct(dt):
-        return {"Struct": [_raw_serde_field(dt.field(i)) for i in range(dt.num_fields)]}
-    if pa.types.is_list(dt) or pa.types.is_large_list(dt):
-        return {"LargeList": _raw_serde_field(dt.value_field)}
-    if pa.types.is_fixed_size_list(dt):
-        return {"FixedSizeList": [_raw_serde_field(dt.value_field), dt.list_size]}
-    if pa.types.is_map(dt):
-        return {"Map": [_raw_serde_field(dt.key_field.with_name("entries")), False]}
-
-    return _primitive_data_type_string(dt)
+    return {
+        "data_type": _data_type_to_value(field.type),
+        "nullable": field.nullable,
+    }
 
 
 def _sort_json_value(value: object) -> object:
@@ -216,20 +202,31 @@ def _hash_schema(schema: pa.Schema) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Field extraction  (flatten structs into BTreeMap<path, DigestBuffer>)
+# DigestBufferType: (nullable, BitVec|None, structural_sha256|None, data_sha256)
 # ---------------------------------------------------------------------------
 
-def _extract_fields(field: pa.Field, parent: str, out: dict[str, tuple[bool, _BitVec | None, object]]):
+def _new_digest_entry(nullable: bool, structured: bool) -> tuple:
+    """Create a digest entry matching Rust DigestBufferType."""
+    return (
+        nullable,
+        _BitVec() if nullable else None,
+        hashlib.sha256() if structured else None,
+        hashlib.sha256(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Field extraction (flatten structs into BTreeMap<path, DigestBuffer>)
+# ---------------------------------------------------------------------------
+
+def _extract_fields(field: pa.Field, parent: str, out: dict[str, tuple]):
     import pyarrow as pa
     full_name = f"{parent}{DELIMITER}{field.name}" if parent else field.name
     if pa.types.is_struct(field.type):
         for i in range(field.type.num_fields):
             _extract_fields(field.type.field(i), full_name, out)
     else:
-        if field.nullable:
-            out[full_name] = (True, _BitVec(), hashlib.sha256())
-        else:
-            out[full_name] = (False, None, hashlib.sha256())
+        out[full_name] = _new_digest_entry(field.nullable, _is_list_type(field.type))
 
 
 # ---------------------------------------------------------------------------
@@ -244,10 +241,8 @@ def _handle_null_bits(arr, bit_vec: _BitVec) -> None:
 
 def _hash_fixed_size_array(arr, digest_entry, element_size: int) -> None:
     """Hash a fixed-width array by reading raw buffers (matching Rust behaviour)."""
-    nullable, bit_vec, data_digest = digest_entry
+    nullable, bit_vec, _structural, data_digest = digest_entry
 
-    # Get raw data buffer. For pyarrow, buffer index 1 is the data buffer for
-    # primitive arrays (index 0 is the validity bitmap).
     bufs = arr.buffers()
     data_buf = bufs[1]
     offset = arr.offset
@@ -257,7 +252,6 @@ def _hash_fixed_size_array(arr, digest_entry, element_size: int) -> None:
     sliced = raw[start:]
 
     if not nullable:
-        # Non-nullable: hash entire buffer slice for the array length
         end = start + len(arr) * element_size
         data_digest.update(raw[start:end])
     else:
@@ -273,7 +267,7 @@ def _hash_fixed_size_array(arr, digest_entry, element_size: int) -> None:
 
 
 def _hash_boolean_array(arr, digest_entry) -> None:
-    nullable, bit_vec, data_digest = digest_entry
+    nullable, bit_vec, _structural, data_digest = digest_entry
 
     if not nullable:
         bv = _BitVec()
@@ -292,10 +286,9 @@ def _hash_boolean_array(arr, digest_entry) -> None:
 def _hash_binary_array(arr, digest_entry) -> None:
     """Hash Binary / LargeBinary arrays.
 
-    Note: matches the *current* Rust implementation including the known bug
-    where nullable null values feed NULL_BYTES into the data digest.
+    Nullable null values are skipped entirely (only valid values are hashed).
     """
-    nullable, bit_vec, data_digest = digest_entry
+    nullable, bit_vec, _structural, data_digest = digest_entry
 
     if not nullable:
         for i in range(len(arr)):
@@ -303,20 +296,9 @@ def _hash_binary_array(arr, digest_entry) -> None:
             data_digest.update(struct.pack("<Q", len(val)))
             data_digest.update(val)
     else:
-        # Handle null bits
-        if arr.null_count > 0:
-            for i in range(len(arr)):
-                bit_vec.push(arr[i].is_valid)
-            for i in range(len(arr)):
-                if arr[i].is_valid:
-                    val = arr[i].as_py()
-                    data_digest.update(struct.pack("<Q", len(val)))
-                    data_digest.update(val)
-                else:
-                    data_digest.update(NULL_BYTES)
-        else:
-            bit_vec.extend_true(len(arr))
-            for i in range(len(arr)):
+        _handle_null_bits(arr, bit_vec)
+        for i in range(len(arr)):
+            if arr[i].is_valid:
                 val = arr[i].as_py()
                 data_digest.update(struct.pack("<Q", len(val)))
                 data_digest.update(val)
@@ -325,10 +307,9 @@ def _hash_binary_array(arr, digest_entry) -> None:
 def _hash_string_array(arr, digest_entry) -> None:
     """Hash Utf8 / LargeUtf8 arrays.
 
-    Note: matches the *current* Rust implementation including the known bug
-    where nullable null values feed NULL_BYTES into the data digest.
+    Nullable null values are skipped entirely (only valid values are hashed).
     """
-    nullable, bit_vec, data_digest = digest_entry
+    nullable, bit_vec, _structural, data_digest = digest_entry
 
     if not nullable:
         for i in range(len(arr)):
@@ -337,50 +318,108 @@ def _hash_string_array(arr, digest_entry) -> None:
             data_digest.update(val)
     else:
         _handle_null_bits(arr, bit_vec)
-        if arr.null_count > 0:
-            for i in range(len(arr)):
-                if arr[i].is_valid:
-                    val = arr[i].as_py().encode("utf-8")
-                    data_digest.update(struct.pack("<Q", len(val)))
-                    data_digest.update(val)
-                else:
-                    data_digest.update(NULL_BYTES)
-        else:
-            for i in range(len(arr)):
+        for i in range(len(arr)):
+            if arr[i].is_valid:
                 val = arr[i].as_py().encode("utf-8")
                 data_digest.update(struct.pack("<Q", len(val)))
                 data_digest.update(val)
 
 
-def _update_data_digest(digest_entry, data: bytes) -> None:
-    digest_entry[2].update(data)
-
-
 def _hash_list_array(arr, field_data_type, digest_entry) -> None:
     import pyarrow as pa
-    nullable, bit_vec, data_digest = digest_entry
+    nullable, bit_vec, structural, data_digest = digest_entry
 
     if not nullable:
         for i in range(len(arr)):
-            sub = arr[i]
-            sub_arr = pa.array(sub.values) if hasattr(sub, 'values') else sub
-            # Actually we need the sub-list as an arrow array
             sub_arr = arr.value(i) if hasattr(arr, 'value') else arr[i].values
-            data_digest.update(struct.pack("<Q", len(sub_arr)))
+            size_bytes = struct.pack("<Q", len(sub_arr))
+            # Write element count to structural digest (separating structure from leaf data)
+            if structural is not None:
+                structural.update(size_bytes)
+            else:
+                data_digest.update(size_bytes)
             _array_digest_update(field_data_type, sub_arr, digest_entry)
     else:
         _handle_null_bits(arr, bit_vec)
-        if arr.null_count > 0:
-            for i in range(len(arr)):
-                if arr[i].is_valid:
-                    sub_arr = arr.value(i) if hasattr(arr, 'value') else arr[i].values
-                    data_digest.update(struct.pack("<Q", len(sub_arr)))
-                    _array_digest_update(field_data_type, sub_arr, digest_entry)
-        else:
-            for i in range(len(arr)):
+        for i in range(len(arr)):
+            if arr[i].is_valid:
                 sub_arr = arr.value(i) if hasattr(arr, 'value') else arr[i].values
-                data_digest.update(struct.pack("<Q", len(sub_arr)))
+                size_bytes = struct.pack("<Q", len(sub_arr))
+                if structural is not None:
+                    structural.update(size_bytes)
+                else:
+                    data_digest.update(size_bytes)
                 _array_digest_update(field_data_type, sub_arr, digest_entry)
+
+
+def _hash_struct_array(arr, data_type, digest_entry) -> None:
+    """Hash a struct array using composite child hashing.
+
+    Each child is independently hashed into its own DigestBufferType,
+    then finalized into the parent's data stream via _finalize_child_into_data.
+    """
+    import pyarrow as pa
+
+    nullable, bit_vec, _structural, data_digest = digest_entry
+
+    # Push struct-level nulls to parent's BitVec
+    if nullable:
+        _handle_null_bits(arr, bit_vec)
+
+    # Sort children alphabetically by field name
+    children = [(i, data_type.field(i)) for i in range(data_type.num_fields)]
+    children.sort(key=lambda x: x[1].name)
+
+    struct_nulls = None
+    if arr.null_count > 0:
+        # Build struct-level null buffer from validity bitmap
+        struct_nulls = [arr[i].is_valid for i in range(len(arr))]
+
+    for idx, child_field in children:
+        child_array = arr.field(idx)
+
+        # Child is effectively nullable if the child field is nullable
+        # OR the struct itself has nulls (struct-level nulls propagate down)
+        effectively_nullable = child_field.nullable or (struct_nulls is not None)
+
+        child_digest = _new_digest_entry(
+            effectively_nullable,
+            _is_list_type(child_field.type),
+        )
+
+        if struct_nulls is not None:
+            # Propagate struct-level nulls: combined = struct AND child
+            combined_child = _combine_struct_nulls_with_child(
+                child_array, struct_nulls
+            )
+            _array_digest_update(child_field.type, combined_child, child_digest)
+        else:
+            _array_digest_update(child_field.type, child_array, child_digest)
+
+        # Finalize child digest into parent's data stream
+        _finalize_child_into_data(digest_entry, child_digest)
+
+
+def _combine_struct_nulls_with_child(child_array, struct_nulls: list[bool]):
+    """Combine struct-level nulls with child nulls and return a new array."""
+    import pyarrow as pa
+
+    # Build combined validity: struct_valid AND child_valid
+    combined_valid = []
+    for i in range(len(child_array)):
+        child_valid = child_array[i].is_valid
+        combined_valid.append(struct_nulls[i] and child_valid)
+
+    # Reconstruct the child array with combined null mask
+    # Convert to Python values and rebuild with explicit mask
+    values = []
+    for i in range(len(child_array)):
+        if combined_valid[i]:
+            values.append(child_array[i].as_py())
+        else:
+            values.append(None)
+
+    return pa.array(values, type=child_array.type)
 
 
 def _element_size_for_type(dt: pa.DataType) -> int | None:
@@ -403,26 +442,39 @@ def _element_size_for_type(dt: pa.DataType) -> int | None:
         return dt.bit_width // 8
     if pa.types.is_fixed_size_binary(dt):
         return dt.byte_width
-    if pa.types.is_decimal32(dt):
-        return 4
-    if pa.types.is_decimal64(dt):
-        return 8
     return None
 
 
 def _array_digest_update(data_type, arr, digest_entry) -> None:
     import pyarrow as pa
 
+    # Normalize small variants to large equivalents
+    if pa.types.is_string(data_type) and not pa.types.is_large_string(data_type):
+        arr = arr.cast(pa.large_utf8())
+        data_type = pa.large_utf8()
+    elif pa.types.is_binary(data_type) and not pa.types.is_large_binary(data_type):
+        arr = arr.cast(pa.large_binary())
+        data_type = pa.large_binary()
+    elif pa.types.is_list(data_type) and not pa.types.is_large_list(data_type):
+        arr = arr.cast(pa.large_list(data_type.value_field))
+        data_type = pa.large_list(data_type.value_field)
+    elif pa.types.is_dictionary(data_type):
+        arr = arr.cast(data_type.value_type)
+        data_type = data_type.value_type
+        # Re-enter to handle potential further normalization
+        _array_digest_update(data_type, arr, digest_entry)
+        return
+
     if pa.types.is_boolean(data_type):
         _hash_boolean_array(arr, digest_entry)
-    elif pa.types.is_binary(data_type) or pa.types.is_large_binary(data_type):
+    elif pa.types.is_large_binary(data_type):
         _hash_binary_array(arr, digest_entry)
-    elif pa.types.is_string(data_type) or pa.types.is_large_string(data_type):
+    elif pa.types.is_large_string(data_type):
         _hash_string_array(arr, digest_entry)
-    elif pa.types.is_list(data_type) or pa.types.is_large_list(data_type):
+    elif pa.types.is_large_list(data_type):
         _hash_list_array(arr, data_type.value_type, digest_entry)
     elif pa.types.is_struct(data_type):
-        raise NotImplementedError("Struct arrays in array_digest_update not supported")
+        _hash_struct_array(arr, data_type, digest_entry)
     else:
         element_size = _element_size_for_type(data_type)
         if element_size is not None:
@@ -436,16 +488,39 @@ def _array_digest_update(data_type, arr, digest_entry) -> None:
 # ---------------------------------------------------------------------------
 
 def _finalize_digest(final_digest: hashlib._Hash, entry: tuple) -> None:
-    nullable, bit_vec, data_digest = entry
-    if not nullable:
-        final_digest.update(data_digest.digest())
-    else:
-        # validity bitmap length as u64 LE
+    nullable, bit_vec, structural, data_digest = entry
+    if nullable:
+        # Validity bitmap length as u64 LE
         final_digest.update(struct.pack("<Q", len(bit_vec)))
-        # raw backing bytes, each word as big-endian u8 (already single bytes, so identity)
+        # Raw backing bytes, each word as big-endian u8 (already single bytes)
         for b in bit_vec.raw_bytes():
             final_digest.update(bytes([b]))
-        final_digest.update(data_digest.digest())
+    # Structural digest (if list type)
+    if structural is not None:
+        final_digest.update(structural.digest())
+    # Data/leaf digest
+    final_digest.update(data_digest.digest())
+
+
+def _finalize_child_into_data(parent_entry: tuple, child_entry: tuple) -> None:
+    """Finalize a child's digest and write the resulting bytes into the parent's data stream.
+
+    Used for composite types (structs) where each child is independently hashed
+    and then its finalized representation is fed into the parent digest.
+    """
+    _p_nullable, _p_bit_vec, _p_structural, parent_data = parent_entry
+    c_nullable, c_bit_vec, c_structural, c_data = child_entry
+
+    # Null bits first (if nullable child)
+    if c_nullable and c_bit_vec is not None:
+        parent_data.update(struct.pack("<Q", len(c_bit_vec)))
+        for b in c_bit_vec.raw_bytes():
+            parent_data.update(bytes([b]))
+    # Structural digest (if list child)
+    if c_structural is not None:
+        parent_data.update(c_structural.digest())
+    # Data/leaf digest
+    parent_data.update(c_data.digest())
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +536,7 @@ class ArrowDigester:
     def __init__(self, schema: pa.Schema) -> None:
         self._schema = schema
         self._schema_digest = _hash_schema(schema)
-        # BTreeMap<path, (nullable, BitVec|None, sha256)> – sorted by key
+        # BTreeMap<path, (nullable, BitVec|None, structural|None, sha256)> – sorted by key
         self._fields: dict[str, tuple] = {}
         for i in range(len(schema)):
             _extract_fields(schema.field(i), "", self._fields)
@@ -525,22 +600,67 @@ class ArrowDigester:
     @staticmethod
     def hash_array(array: pa.Array) -> bytes:
         """Hash a single array (matches Rust ``hash_array``)."""
-        dt_value = _raw_serde_data_type(array.type)
+        import pyarrow as pa
+
+        # Resolve dictionary arrays to their plain value type
+        effective_type = array.type
+        effective_array = array
+        if pa.types.is_dictionary(effective_type):
+            effective_type = effective_type.value_type
+            effective_array = array.cast(effective_type)
+
+        # Normalize to canonical large types
+        normalized_type = _normalize_data_type(effective_type)
+
+        # Use data_type_to_value for canonical metadata serialization
+        dt_value = _data_type_to_value(normalized_type)
         dt_json = json.dumps(dt_value, separators=(",", ":"))
 
         final_digest = hashlib.sha256()
         final_digest.update(dt_json.encode())
 
-        nullable = array.null_count > 0 or (hasattr(array, 'buffers') and array.buffers()[0] is not None)
-        # Match Rust: array.is_nullable() checks if the null bitmap buffer exists
-        # In pyarrow, if any null exists OR the array was constructed as nullable,
-        # buffers()[0] will be non-None.
-        if nullable:
-            entry = (True, _BitVec(), hashlib.sha256())
-        else:
-            entry = (False, None, hashlib.sha256())
+        # Match Rust: is_nullable() checks null_count > 0, not buffer existence.
+        # Arrays with all-valid values but a null bitmap (e.g. from dictionary cast)
+        # are treated as non-nullable.
+        nullable = effective_array.null_count > 0
 
-        _array_digest_update(array.type, array, entry)
+        entry = _new_digest_entry(nullable, _is_list_type(normalized_type))
+        _array_digest_update(effective_type, effective_array, entry)
         _finalize_digest(final_digest, entry)
 
         return VERSION_BYTES + final_digest.digest()
+
+
+# ---------------------------------------------------------------------------
+# Type normalization (matches Rust normalize_data_type / normalize_field)
+# ---------------------------------------------------------------------------
+
+def _normalize_data_type(dt: pa.DataType) -> pa.DataType:
+    """Recursively normalize a DataType to its canonical large equivalent."""
+    import pyarrow as pa
+
+    if pa.types.is_dictionary(dt):
+        return _normalize_data_type(dt.value_type)
+    if dt == pa.utf8():
+        return pa.large_utf8()
+    if dt == pa.binary():
+        return pa.large_binary()
+    if pa.types.is_list(dt) or pa.types.is_large_list(dt):
+        inner = _normalize_field(dt.value_field)
+        return pa.large_list(inner)
+    if pa.types.is_struct(dt):
+        fields = [_normalize_field(dt.field(i)) for i in range(dt.num_fields)]
+        return pa.struct(fields)
+    if pa.types.is_fixed_size_list(dt):
+        inner = _normalize_field(dt.value_field)
+        return pa.list_(inner, dt.list_size)
+    if pa.types.is_map(dt):
+        inner = _normalize_field(dt.key_field)
+        return pa.map_(inner.type, dt.item_field.type)
+    return dt
+
+
+def _normalize_field(field: pa.Field) -> pa.Field:
+    """Normalize a single field: keep name and nullability, normalize the data type."""
+    import pyarrow as pa
+    return pa.field(field.name, _normalize_data_type(field.type), field.nullable)
