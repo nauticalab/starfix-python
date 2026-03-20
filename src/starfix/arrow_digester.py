@@ -1,6 +1,7 @@
 """Pure-Python implementation of the starfix Arrow logical hasher.
 
-Implements the byte-layout specification from ``docs/byte-layout-spec.md``.
+Implements the byte-layout specification defined in the starfix Rust crate
+(``nauticalab/starfix docs/byte-layout-spec.md``).
 """
 
 from __future__ import annotations
@@ -311,8 +312,9 @@ def _normalize_data_type(dt: pa.DataType) -> pa.DataType:
         inner = _normalize_field(dt.value_field)
         return pa.list_(inner, dt.list_size)
     if pa.types.is_map(dt):
-        inner = _normalize_field(dt.key_field)
-        return pa.map_(inner.type, dt.item_field.type)
+        key_field = _normalize_field(dt.key_field)
+        item_field = _normalize_field(dt.item_field)
+        return pa.map_(key_field.type, item_field.type, keys_sorted=dt.keys_sorted)
     return dt
 
 
