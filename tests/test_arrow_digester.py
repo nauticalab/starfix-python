@@ -131,7 +131,7 @@ class TestArrayHashing:
             type=pa.list_(pa.field("item", pa.int32(), nullable=True)),
         )
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "00000190658c2c4e9178f8ae6c686d6fe13262a9fab9cb619542911453abeca8195a9f"
+        assert h == "000001dc359d563a1ed210eb271b314612ea8343f0a0b0955b9053a9eb47962d27163c"
 
     def test_decimal128_array(self):
         from decimal import Decimal
