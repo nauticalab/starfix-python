@@ -5,7 +5,7 @@ the Rust starfix crate.  The Rust values are treated as the authoritative source
 of truth; these tests are regression guards that will fail immediately if the
 Python implementation diverges.
 
-Covers 37+ distinct Arrow tables / arrays across categories:
+Covers 40+ distinct Arrow tables / arrays across categories:
   - Empty arrays (0 elements)
   - All-null arrays
   - Large boolean arrays (multi-byte bitvec)
@@ -14,6 +14,7 @@ Covers 37+ distinct Arrow tables / arrays across categories:
   - Three-level nested structs
   - Struct with list child
   - List<Struct>, nullable List<Struct>
+  - List<Struct> with nullable vs non-nullable item field (PLT-1048 edge case)
   - Non-nullable lists
   - Mixed-type structs
   - Mixed struct+list record batches
@@ -892,6 +893,79 @@ class TestMultiBatchList:
         d.update(batch2)
         result = d.finalize().hex()
         assert result == "000001fcf529d339593cb8537af4c1ed7d02aae69cfbbd2608b02e811035edb6ba4ec3"
+
+
+# ---------------------------------------------------------------------------
+# Float special values
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# LargeList<Struct> with nullable vs non-nullable inner (item) field
+#
+# This exercises the structural-only BTreeMap entry created for List<Struct>.
+# When inner_field.nullable=True the entry's BitVec is allocated but never
+# populated (bit_count=0), so 8 zero bytes are prepended to the structural
+# digest at finalisation.  Both Rust and Python handle this identically.
+# Golden values verified via `cargo test list_struct_nullable_inner_field_parity`
+# against the Rust starfix crate (PLT-1048).
+# ---------------------------------------------------------------------------
+
+
+class TestListStructNullableInnerField:
+    """LargeList<Struct> — nullable vs non-nullable item field parity."""
+
+    _ids = [1, 2, 3, 4]
+    _labels = ["a", "b", "c", "d"]
+
+    def _make_list_array(self, inner_nullable: bool) -> "pa.LargeListArray":
+        ids = pa.array(self._ids, type=pa.int32())
+        labels = pa.array(self._labels, type=pa.large_utf8())
+        struct_fields = [
+            pa.field("id", pa.int32(), nullable=False),
+            pa.field("label", pa.large_utf8(), nullable=False),
+        ]
+        struct_arr = pa.StructArray.from_arrays(
+            [ids, labels],
+            fields=struct_fields,
+        )
+        inner_field = pa.field("item", pa.struct(struct_fields), nullable=inner_nullable)
+        offsets = pa.array([0, 2, 4], type=pa.int64())
+        return pa.LargeListArray.from_arrays(
+            offsets,
+            struct_arr,
+            type=pa.large_list(inner_field),
+        )
+
+    def test_nullable_inner_field(self):
+        """LargeList<Struct> with nullable=True item field.
+
+        ids=[1,2,3,4], labels=['a','b','c','d'], offsets=[0,2,4]
+        inner_field.nullable=True → structural-only entry has empty BitVec.
+        Golden value confirmed against Rust (PLT-1048).
+        """
+        result = ArrowDigester.hash_array(self._make_list_array(inner_nullable=True)).hex()
+        assert result == "0000012c2b1c1d5b4c3dc46ed5335834dbf0d7386c38e607a398a2897fdaf1df387e1c"
+
+    def test_non_nullable_inner_field(self):
+        """LargeList<Struct> with nullable=False item field.
+
+        ids=[1,2,3,4], labels=['a','b','c','d'], offsets=[0,2,4]
+        inner_field.nullable=False → no BitVec in structural-only entry.
+        Golden value confirmed against Rust (PLT-1048).
+        """
+        result = ArrowDigester.hash_array(self._make_list_array(inner_nullable=False)).hex()
+        assert result == "000001713fa0e500c9aebea61039b30371fd84c0dff8cd3b96b4266978658bf73e4d8c"
+
+    def test_nullable_differs_from_non_nullable(self):
+        """Nullable vs non-nullable inner field must produce different hashes."""
+        hash_nullable = ArrowDigester.hash_array(self._make_list_array(inner_nullable=True)).hex()
+        hash_not_nullable = ArrowDigester.hash_array(
+            self._make_list_array(inner_nullable=False)
+        ).hex()
+        assert hash_nullable != hash_not_nullable, (
+            "nullable and non-nullable item fields must produce distinct hashes"
+        )
 
 
 # ---------------------------------------------------------------------------
