@@ -722,6 +722,7 @@ class ArrowDigester:
 
         # Step 1: Type metadata (canonical JSON string)
         dt_value = _data_type_to_value(normalized_type)
+        dt_value = _sort_json_value(dt_value)
         dt_json = json.dumps(dt_value, separators=(",", ":"))
 
         final_digest = hashlib.sha256()
