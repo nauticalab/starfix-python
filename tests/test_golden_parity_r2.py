@@ -896,11 +896,6 @@ class TestMultiBatchList:
 
 
 # ---------------------------------------------------------------------------
-# Float special values
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # LargeList<Struct> with nullable vs non-nullable inner (item) field
 #
 # This exercises the structural-only BTreeMap entry created for List<Struct>.
