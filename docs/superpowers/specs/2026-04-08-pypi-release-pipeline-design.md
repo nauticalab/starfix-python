@@ -164,5 +164,6 @@ Configure on both indexes before pushing the first tag.
 ## Out of Scope
 
 - Changes to `src/` or `tests/` (no functional code changes)
-- Updating `orcapod-python`'s dependency specifier (separate issue PLT-1251 dependency)
+- Updating `orcapod-python`'s dependency specifier to remove the git URL (tracked in PLT-1250)
 - Setting up PyPI Trusted Publishers (manual step documented above, performed by repo owner)
+- Configuring `license-check` and `dependency-review` as required branch-protection status checks (one-time GitHub Settings → Branches step, optional but recommended)
