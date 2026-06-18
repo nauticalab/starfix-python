@@ -14,7 +14,9 @@ option in the Python implementation with byte-for-byte parity to the Rust output
 ## Goals
 
 - Add `include_metadata: bool = False` to the relevant `ArrowDigester` entry points.
-- Default (`False`) preserves v0.1.0 hash stability — all existing golden tests continue to pass.
+- Default (`False`) preserves hash format version 0.0.1 stability — all existing golden tests
+  continue to pass unchanged. (`VERSION_BYTES = b"\x00\x00\x01"` is independent of the package
+  version and does not change.)
 - `True` detects any change to schema-level or field-level Arrow metadata.
 - Hash is deterministic regardless of metadata key insertion order.
 - Python output is byte-for-byte identical to the Rust `starfix` crate when
@@ -26,7 +28,7 @@ option in the Python implementation with byte-for-byte parity to the Rust output
   intentionally absent here, matching the Rust API.
 - Finer-grained metadata control (per-field opt-in, key filtering) — future work.
 - Upstream consumer migration (e.g. Orcapod) — separate issue.
-- Releasing v0.2.0 — handled separately after this PR merges.
+- Package version bump — handled separately after this PR merges.
 
 ## Algorithm
 
@@ -128,7 +130,7 @@ New file: `tests/test_metadata_hashing.py`.
 
 | Class | What it checks |
 |---|---|
-| `TestMetadataExcludedByDefault` | `include_metadata=False` ignores metadata; uses a golden value from `test_golden_parity.py` |
+| `TestMetadataExcludedByDefault` | `include_metadata=False` ignores metadata; hash matches existing hash format 0.0.1 golden values from `test_golden_parity.py` |
 | `TestFieldMetadataChangesHash` | `True` detects field-level metadata changes across `hash_schema`, `hash_record_batch`, `hash_table` |
 | `TestSchemaMetadataChangesHash` | `True` detects schema-level metadata changes; field vs schema metadata are independently encoded |
 | `TestMetadataDeterminism` | Same keys, different insertion order → same hash; multiple fields with shuffled keys |
