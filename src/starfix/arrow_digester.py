@@ -746,9 +746,20 @@ class ArrowDigester:
     Produces identical SHA-256 hashes with a 3-byte version prefix.
     """
 
-    def __init__(self, schema: pa.Schema) -> None:
+    def __init__(self, schema: pa.Schema, *, include_metadata: bool = False) -> None:
+        """Initialize a streaming Arrow hasher.
+
+        Args:
+            schema: The Arrow schema all record batches must conform to.
+            include_metadata: When True, schema-level and per-field Arrow
+                metadata are included in the hash. Default is False,
+                preserving hash format 0.0.1 stability. A schema with no
+                metadata produces the same hash regardless of this flag
+                (empty-metadata invariant).
+        """
         self._schema = schema
-        self._schema_digest = _hash_schema(schema)
+        self._include_metadata = include_metadata  # captured in _schema_digest; stored for repr/diagnostics
+        self._schema_digest = _hash_schema(schema, include_metadata=include_metadata)
         # BTreeMap<path, (BitVec|None, sha256|None, sha256|None)> — sorted by key
         self._fields: dict[str, tuple] = {}
         for i in range(len(schema)):
@@ -784,19 +795,44 @@ class ArrowDigester:
     # -- Convenience class methods ------------------------------------------
 
     @staticmethod
-    def hash_schema(schema: pa.Schema) -> bytes:
-        return VERSION_BYTES + _hash_schema(schema)
+    def hash_schema(schema: pa.Schema, *, include_metadata: bool = False) -> bytes:
+        """Hash an Arrow schema.
+
+        Args:
+            schema: The schema to hash.
+            include_metadata: When True, schema-level and per-field Arrow
+                metadata are included in the hash. Default is False,
+                preserving hash format 0.0.1 stability. A schema with no
+                metadata produces the same hash regardless of this flag
+                (empty-metadata invariant).
+        """
+        return VERSION_BYTES + _hash_schema(schema, include_metadata=include_metadata)
 
     @staticmethod
-    def hash_record_batch(record_batch: pa.RecordBatch) -> bytes:
-        d = ArrowDigester(record_batch.schema)
+    def hash_record_batch(record_batch: pa.RecordBatch, *, include_metadata: bool = False) -> bytes:
+        """Hash an Arrow record batch.
+
+        Args:
+            record_batch: The record batch to hash.
+            include_metadata: When True, schema-level and per-field Arrow
+                metadata are included in the hash. Default is False,
+                preserving hash format 0.0.1 stability.
+        """
+        d = ArrowDigester(record_batch.schema, include_metadata=include_metadata)
         d.update(record_batch)
         return d.finalize()
 
     @staticmethod
-    def hash_table(table: pa.Table) -> bytes:
-        """Hash a full table (iterates over all batches)."""
-        d = ArrowDigester(table.schema)
+    def hash_table(table: pa.Table, *, include_metadata: bool = False) -> bytes:
+        """Hash a full Arrow table (iterates over all batches).
+
+        Args:
+            table: The table to hash.
+            include_metadata: When True, schema-level and per-field Arrow
+                metadata are included in the hash. Default is False,
+                preserving hash format 0.0.1 stability.
+        """
+        d = ArrowDigester(table.schema, include_metadata=include_metadata)
         for batch in table.to_batches():
             d.update(batch)
         return d.finalize()

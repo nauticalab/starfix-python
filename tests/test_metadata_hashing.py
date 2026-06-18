@@ -102,3 +102,75 @@ class TestEmptyMetadataInvariant:
             ArrowDigester.hash_schema(schema, include_metadata=True)
             == ArrowDigester.hash_schema(schema, include_metadata=False)
         )
+
+
+class TestFieldMetadataChangesHash:
+    def test_hash_schema_detects_field_metadata(self):
+        schema_plain = pa.schema([pa.field("x", pa.int32(), nullable=False)])
+        schema_meta = pa.schema([
+            pa.field("x", pa.int32(), nullable=False, metadata={b"unit": b"kg"}),
+        ])
+        assert (
+            ArrowDigester.hash_schema(schema_plain, include_metadata=True)
+            != ArrowDigester.hash_schema(schema_meta, include_metadata=True)
+        )
+
+    def test_hash_record_batch_detects_field_metadata(self):
+        schema_plain = pa.schema([pa.field("x", pa.int32(), nullable=False)])
+        schema_meta = pa.schema([
+            pa.field("x", pa.int32(), nullable=False, metadata={b"unit": b"kg"}),
+        ])
+        batch_plain = pa.record_batch({"x": pa.array([1, 2], type=pa.int32())}, schema=schema_plain)
+        batch_meta = pa.record_batch({"x": pa.array([1, 2], type=pa.int32())}, schema=schema_meta)
+        assert (
+            ArrowDigester.hash_record_batch(batch_plain, include_metadata=True)
+            != ArrowDigester.hash_record_batch(batch_meta, include_metadata=True)
+        )
+
+    def test_hash_table_detects_field_metadata(self):
+        schema_plain = pa.schema([pa.field("x", pa.int32(), nullable=False)])
+        schema_meta = pa.schema([
+            pa.field("x", pa.int32(), nullable=False, metadata={b"unit": b"kg"}),
+        ])
+        table_plain = pa.table({"x": pa.array([1, 2], type=pa.int32())}, schema=schema_plain)
+        table_meta = pa.table({"x": pa.array([1, 2], type=pa.int32())}, schema=schema_meta)
+        assert (
+            ArrowDigester.hash_table(table_plain, include_metadata=True)
+            != ArrowDigester.hash_table(table_meta, include_metadata=True)
+        )
+
+    def test_streaming_digester_detects_field_metadata(self):
+        schema_plain = pa.schema([pa.field("x", pa.int32(), nullable=False)])
+        schema_meta = pa.schema([
+            pa.field("x", pa.int32(), nullable=False, metadata={b"unit": b"kg"}),
+        ])
+        batch_plain = pa.record_batch({"x": pa.array([1, 2], type=pa.int32())}, schema=schema_plain)
+        batch_meta = pa.record_batch({"x": pa.array([1, 2], type=pa.int32())}, schema=schema_meta)
+
+        d_plain = ArrowDigester(schema_plain, include_metadata=True)
+        d_plain.update(batch_plain)
+
+        d_meta = ArrowDigester(schema_meta, include_metadata=True)
+        d_meta.update(batch_meta)
+
+        assert d_plain.finalize() != d_meta.finalize()
+
+    def test_struct_child_metadata_changes_hash(self):
+        child_plain = pa.field("age", pa.int32(), nullable=False)
+        child_meta = pa.field("age", pa.int32(), nullable=False, metadata={b"unit": b"years"})
+        schema_plain = pa.schema([pa.field("person", pa.struct([child_plain]), nullable=False)])
+        schema_meta = pa.schema([pa.field("person", pa.struct([child_meta]), nullable=False)])
+        assert (
+            ArrowDigester.hash_schema(schema_plain, include_metadata=True)
+            != ArrowDigester.hash_schema(schema_meta, include_metadata=True)
+        )
+
+    def test_list_element_field_metadata_changes_hash(self):
+        element_plain = pa.field("item", pa.int32(), nullable=False)
+        element_meta = pa.field("item", pa.int32(), nullable=False, metadata={b"unit": b"count"})
+        schema_plain = pa.schema([pa.field("items", pa.large_list(element_plain), nullable=True)])
+        schema_meta = pa.schema([pa.field("items", pa.large_list(element_meta), nullable=True)])
+        assert (
+            ArrowDigester.hash_schema(schema_plain, include_metadata=True)
+            != ArrowDigester.hash_schema(schema_meta, include_metadata=True)
+        )
