@@ -27,6 +27,7 @@ option in the Python implementation with byte-for-byte parity to the Rust output
 - `hash_array` — standalone arrays carry no schema or field metadata; `include_metadata` is
   intentionally absent here, matching the Rust API.
 - Finer-grained metadata control (per-field opt-in, key filtering) — future work.
+- Cross-language golden vector parity for `include_metadata=True` — deferred to PLT-1735.
 - Upstream consumer migration (e.g. Orcapod) — separate issue.
 - Package version bump — handled separately after this PR merges.
 
