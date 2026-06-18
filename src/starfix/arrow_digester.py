@@ -198,6 +198,67 @@ def _hash_schema(schema: pa.Schema) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Metadata helpers  (Phase 2 schema hashing — PLT-1734)
+# ---------------------------------------------------------------------------
+
+def _sort_metadata(metadata) -> dict[str, str]:
+    """Decode PyArrow's bytes-keyed/valued metadata into a sorted str-keyed/valued dict.
+
+    Returns an empty dict when metadata is None or empty.
+    Arrow IPC spec guarantees metadata keys and values are valid UTF-8.
+    The str fallback in the key/value decoding is defensive for direct callers.
+    """
+    if not metadata:
+        return {}
+    return dict(sorted(
+        (k.decode("utf-8") if isinstance(k, bytes) else k,
+         v.decode("utf-8") if isinstance(v, bytes) else v)
+        for k, v in metadata.items()
+    ))
+
+
+def _collect_nested_field_metadata(
+    field, path: str
+) -> dict[str, dict[str, str]]:
+    """Recursively collect metadata from a field and its nested children.
+
+    Returns a dict sorted by path: {path: sorted_metadata_dict}.
+    Only fields with non-empty metadata are included.
+
+    Path convention (matches the data-hashing BTreeMap paths):
+    - Struct children:                          "{parent_path}/{child_name}"
+    - List/LargeList/FixedSizeList/Map element: "{parent_path}/"  (trailing slash, no element name)
+
+    For Map types, only the value/item field is traversed; Map key fields are
+    intentionally skipped (no path exists for them in the data-hashing BTreeMap).
+    """
+    import pyarrow as pa
+
+    result: dict[str, dict[str, str]] = {}
+
+    if field.metadata:
+        result[path] = _sort_metadata(field.metadata)
+
+    if pa.types.is_struct(field.type):
+        for i in range(field.type.num_fields):
+            child = field.type.field(i)
+            child_path = f"{path}{DELIMITER}{child.name}"
+            result.update(_collect_nested_field_metadata(child, child_path))
+    elif (
+        pa.types.is_list(field.type)
+        or pa.types.is_large_list(field.type)
+        or pa.types.is_fixed_size_list(field.type)
+    ):
+        element_path = f"{path}{DELIMITER}"
+        result.update(_collect_nested_field_metadata(field.type.value_field, element_path))
+    elif pa.types.is_map(field.type):
+        element_path = f"{path}{DELIMITER}"
+        result.update(_collect_nested_field_metadata(field.type.item_field, element_path))
+
+    return dict(sorted(result.items()))
+
+
+# ---------------------------------------------------------------------------
 # DigestBufferType  (spec Section 3: null_bits, structural, data)
 #
 # Each entry is a 3-tuple: (BitVec|None, sha256|None, sha256|None)
