@@ -10,12 +10,17 @@ import hashlib
 import json
 import struct
 from collections import OrderedDict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from hashlib import _Hash
-
     import pyarrow as pa
+
+
+class _Hasher(Protocol):
+    """Minimal protocol for a hash accumulator (e.g. ``hashlib.sha256()``)."""
+
+    def update(self, data: bytes | bytearray, /) -> None: ...
+
 
 VERSION_BYTES = b"\x00\x00\x01"
 DELIMITER = "/"
@@ -256,7 +261,7 @@ def _collect_nested_field_metadata(
     return dict(sorted(result.items()))
 
 
-def _update_metadata_hash(hasher: _Hash, schema: pa.Schema) -> None:
+def _update_metadata_hash(hasher: _Hasher, schema: pa.Schema) -> None:
     """Feed Phase 2 metadata JSON into ``hasher`` (only when metadata is present).
 
     Builds a compact JSON string of the form:
