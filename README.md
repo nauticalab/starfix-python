@@ -36,6 +36,31 @@ for batch in batches:
 digest = digester.finalize()
 ```
 
+## Metadata hashing
+
+By default, Arrow schema- and field-level metadata are excluded from the hash,
+preserving hash format 0.0.1 stability. Pass `include_metadata=True` to any
+entry point to include them:
+
+```python
+# One-shot
+digest = ArrowDigester.hash_table(table, include_metadata=True)
+
+# Streaming
+digester = ArrowDigester(schema, include_metadata=True)
+for batch in batches:
+    digester.update(batch)
+digest = digester.finalize()
+```
+
+When `include_metadata=True`, adding or changing any metadata key or value on
+any field (including nested struct children and list element fields) produces a
+different hash. Metadata key ordering is deterministic — the hash is stable
+regardless of insertion order.
+
+A schema with no metadata produces the same hash regardless of `include_metadata`
+(empty-metadata invariant).
+
 ## License
 
 MIT OR Apache-2.0

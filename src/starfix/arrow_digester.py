@@ -743,7 +743,14 @@ def _finalize_digest(final_digest, entry: tuple) -> None:
 class ArrowDigester:
     """Pure-Python equivalent of the Rust ``ArrowDigester``.
 
-    Produces identical SHA-256 hashes with a 3-byte version prefix.
+    Produces identical SHA-256 hashes with a 3-byte version prefix
+    (hash format version 0.0.1, independent of the package version).
+
+    By default, Arrow schema- and field-level metadata are excluded from
+    the hash. Pass ``include_metadata=True`` to any entry point to include
+    them — see the ``include_metadata`` parameter on each method.
+    A schema with no metadata produces the same hash regardless of that
+    flag (empty-metadata invariant).
     """
 
     def __init__(self, schema: pa.Schema, *, include_metadata: bool = False) -> None:
@@ -816,7 +823,9 @@ class ArrowDigester:
             record_batch: The record batch to hash.
             include_metadata: When True, schema-level and per-field Arrow
                 metadata are included in the hash. Default is False,
-                preserving hash format 0.0.1 stability.
+                preserving hash format 0.0.1 stability. A schema with no
+                metadata produces the same hash regardless of this flag
+                (empty-metadata invariant).
         """
         d = ArrowDigester(record_batch.schema, include_metadata=include_metadata)
         d.update(record_batch)
@@ -830,7 +839,9 @@ class ArrowDigester:
             table: The table to hash.
             include_metadata: When True, schema-level and per-field Arrow
                 metadata are included in the hash. Default is False,
-                preserving hash format 0.0.1 stability.
+                preserving hash format 0.0.1 stability. A schema with no
+                metadata produces the same hash regardless of this flag
+                (empty-metadata invariant).
         """
         d = ArrowDigester(table.schema, include_metadata=include_metadata)
         for batch in table.to_batches():
@@ -842,6 +853,10 @@ class ArrowDigester:
         """Hash a single array (spec Section 6).
 
         Uses the same recursive BTreeMap decomposition as the record-batch path.
+
+        Note:
+            ``include_metadata`` is intentionally absent here — standalone arrays
+            carry no schema or field metadata. This matches the Rust ``starfix`` API.
         """
         import pyarrow as pa
 
