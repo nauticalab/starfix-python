@@ -92,3 +92,13 @@ class TestCollectNestedFieldMetadata:
         list_field = pa.field("items", pa.list_(element, 3))
         result = _collect_nested_field_metadata(list_field, "items")
         assert result == {"items/": {"unit": "count"}}
+
+
+class TestEmptyMetadataInvariant:
+    def test_no_metadata_include_true_equals_false(self):
+        """Schema with no metadata: include_metadata=True == include_metadata=False."""
+        schema = pa.schema([pa.field("x", pa.int32(), nullable=False)])
+        assert (
+            ArrowDigester.hash_schema(schema, include_metadata=True)
+            == ArrowDigester.hash_schema(schema, include_metadata=False)
+        )

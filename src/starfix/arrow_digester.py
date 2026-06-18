@@ -13,6 +13,8 @@ from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from hashlib import _Hash
+
     import pyarrow as pa
 
 VERSION_BYTES = b"\x00\x00\x01"
@@ -193,10 +195,6 @@ def _serialized_schema(schema: pa.Schema) -> str:
     return json.dumps(sorted_fields, separators=(",", ":"))
 
 
-def _hash_schema(schema: pa.Schema) -> bytes:
-    return hashlib.sha256(_serialized_schema(schema).encode()).digest()
-
-
 # ---------------------------------------------------------------------------
 # Metadata helpers  (Phase 2 schema hashing — PLT-1734)
 # ---------------------------------------------------------------------------
@@ -256,6 +254,44 @@ def _collect_nested_field_metadata(
         result.update(_collect_nested_field_metadata(field.type.item_field, element_path))
 
     return dict(sorted(result.items()))
+
+
+def _update_metadata_hash(hasher: _Hash, schema: pa.Schema) -> None:
+    """Feed Phase 2 metadata JSON into ``hasher`` (only when metadata is present).
+
+    Builds a compact JSON string of the form:
+      {"fields": {"<path>": {"<key>": "<val>", ...}, ...}, "schema": {"<key>": "<val>", ...}}
+
+    ``"fields"`` is omitted when no field (at any nesting level) has metadata.
+    ``"schema"`` is omitted when the schema has no metadata.
+    Nothing is written when both would be absent (empty-metadata invariant).
+    """
+    import pyarrow as pa
+
+    # Collect all field metadata recursively.
+    # _collect_nested_field_metadata returns per-subtree sorted paths, but
+    # cross-field order depends on schema field order, so we sort globally below.
+    all_field_meta: dict[str, dict[str, str]] = {}
+    for i in range(len(schema)):
+        field = schema.field(i)
+        all_field_meta.update(_collect_nested_field_metadata(field, field.name))
+
+    meta_doc: dict[str, object] = {}
+    if all_field_meta:
+        meta_doc["fields"] = dict(sorted(all_field_meta.items()))
+    if schema.metadata:
+        meta_doc["schema"] = _sort_metadata(schema.metadata)
+
+    if meta_doc:
+        hasher.update(json.dumps(meta_doc, separators=(",", ":")).encode())
+
+
+def _hash_schema(schema: pa.Schema, include_metadata: bool = False) -> bytes:
+    h = hashlib.sha256()
+    h.update(_serialized_schema(schema).encode())
+    if include_metadata:
+        _update_metadata_hash(h, schema)
+    return h.digest()
 
 
 # ---------------------------------------------------------------------------
