@@ -288,7 +288,7 @@ def _update_metadata_hash(hasher: _Hasher, schema: pa.Schema) -> None:
         meta_doc["schema"] = _sort_metadata(schema.metadata)
 
     if meta_doc:
-        hasher.update(json.dumps(meta_doc, separators=(",", ":")).encode())
+        hasher.update(json.dumps(meta_doc, separators=(",", ":"), ensure_ascii=False).encode())
 
 
 def _hash_schema(schema: pa.Schema, include_metadata: bool = False) -> bytes:
