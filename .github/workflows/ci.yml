@@ -60,3 +60,31 @@ jobs:
             LGPL-2.0-only, LGPL-2.0-or-later,
             LGPL-2.1-only, LGPL-2.1-or-later,
             LGPL-3.0-only, LGPL-3.0-or-later
+
+  golden-sync-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.STARFIX_APP_ID }}
+          private-key: ${{ secrets.STARFIX_APP_PRIVATE_KEY }}
+          repositories: starfix
+
+      - name: Fetch authoritative fixture from starfix
+        run: |
+          gh api repos/nauticalab/starfix/contents/tests/golden/include_metadata_v0.3.json \
+            --jq '.content' | base64 -d > /tmp/upstream.json
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Fail on fixture drift
+        run: |
+          if ! diff tests/golden/include_metadata_v0.3.json /tmp/upstream.json; then
+            echo "ERROR: tests/golden/include_metadata_v0.3.json has drifted from nauticalab/starfix main."
+            echo "Copy the updated fixture from the starfix repo and commit it."
+            exit 1
+          fi
