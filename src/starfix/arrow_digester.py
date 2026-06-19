@@ -197,7 +197,7 @@ def _serialized_schema(schema: pa.Schema) -> str:
         fields[field.name] = _sort_json_value(value)
     # Sort by field name (BTreeMap ordering)
     sorted_fields = OrderedDict(sorted(fields.items()))
-    return json.dumps(sorted_fields, separators=(",", ":"))
+    return json.dumps(sorted_fields, separators=(",", ":"), ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
