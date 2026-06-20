@@ -98,24 +98,30 @@ def test_empty_metadata_invariant_both_flags() -> None:
 
 
 def test_key_reorder_hashes_are_identical() -> None:
-    """key_reorder_canonical and key_reorder_shuffled must share the same expected_hash."""
+    """key_reorder_canonical and key_reorder_shuffled encode to identical IPC bytes.
+
+    arrow-ipc normalises metadata key order (alphabetical sort) before FlatBuffers
+    encoding, so both vectors produce byte-identical blobs regardless of insertion
+    order. This test asserts those fixture invariants explicitly, then hashes once
+    as a live sanity check — re-hashing both would just hash the same bytes twice.
+    """
     canonical = _get_vector("key_reorder_canonical")
     shuffled = _get_vector("key_reorder_shuffled")
 
-    schema_c, _ = _deserialize_ipc(canonical["ipc_b64"])
-    schema_s, _ = _deserialize_ipc(shuffled["ipc_b64"])
-
-    hash_c = ArrowDigester.hash_schema(schema_c, include_metadata=True).hex()
-    hash_s = ArrowDigester.hash_schema(schema_s, include_metadata=True).hex()
-
-    assert hash_c == canonical["expected_hash"], (
-        f"key_reorder_canonical live hash drifted from fixture"
+    # Fixture invariants: arrow-ipc sorts keys before encoding, so both entries
+    # must carry the same IPC blob and the same expected hash.
+    assert canonical["ipc_b64"] == shuffled["ipc_b64"], (
+        "key_reorder_canonical and key_reorder_shuffled must have identical ipc_b64 "
+        "(arrow-ipc normalises metadata key order before FlatBuffers encoding)"
     )
-    assert hash_s == shuffled["expected_hash"], (
-        f"key_reorder_shuffled live hash drifted from fixture"
+    assert canonical["expected_hash"] == shuffled["expected_hash"], (
+        "key_reorder_canonical and key_reorder_shuffled must have identical expected_hash"
     )
-    assert hash_c == hash_s, (
-        "key_reorder_canonical and key_reorder_shuffled must have identical hashes\n"
-        f"  canonical: {hash_c}\n"
-        f"  shuffled:  {hash_s}"
+
+    # Sanity check: live hash must match the (single) fixture value.
+    schema, _ = _deserialize_ipc(canonical["ipc_b64"])
+    live_hash = ArrowDigester.hash_schema(schema, include_metadata=True).hex()
+    assert live_hash == canonical["expected_hash"], (
+        f"key_reorder live hash drifted from fixture: "
+        f"got {live_hash}, expected {canonical['expected_hash']}"
     )
