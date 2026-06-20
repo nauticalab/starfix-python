@@ -309,16 +309,18 @@ jobs:
 
       - name: Release
         run: cargo release ${{ inputs.version }} --execute --no-confirm
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 ```
 
 A GitHub App token (rather than `GITHUB_TOKEN`) is required for checkout so that the tag
 push from `cargo-release` triggers the downstream `ci.yml` workflow.
 `GITHUB_TOKEN`-pushed events do not trigger other workflows (GitHub's recursion guard).
 
+crates.io publishing uses **trusted publishing** (OIDC) — no API token secret is needed.
+The job requires `id-token: write` permission so GitHub Actions can mint the OIDC token
+that crates.io accepts.
+
 Required secrets: `RELEASE_APP_ID`, `RELEASE_APP_PRIVATE_KEY` — a GitHub App with
-`contents:write` on `nauticalab/starfix`; `CARGO_REGISTRY_TOKEN` — a crates.io API token.
+`contents:write` on `nauticalab/starfix`.
 
 **What this workflow does end-to-end:**
 1. `cargo-release` bumps `Cargo.toml` → commits → publishes crate to crates.io → creates `v{version}` tag → pushes both
