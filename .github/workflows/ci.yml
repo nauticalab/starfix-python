@@ -66,6 +66,11 @@ jobs:
 
   golden-sync-check:
     runs-on: ubuntu-latest
+    # Secrets are not available to fork PRs, so skip the check there.
+    # Internal PRs and pushes to main always run it.
+    if: >
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
     steps:
