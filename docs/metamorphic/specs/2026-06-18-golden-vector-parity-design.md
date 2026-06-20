@@ -239,10 +239,10 @@ pushes both — making it structurally impossible to tag without also updating `
 pre-release-commit-message = "chore: release v{{version}}"
 tag-name                   = "v{{version}}"
 push                       = true
-publish                    = false   # wheels go via maturin, not crates.io
+publish                    = true   # cargo-release publishes the crate to crates.io
 ```
 
-### `cargo-release` CI enforcement (new job in `maturin-release.yml`)
+### `cargo-release` CI enforcement (`verify-version-tag-sync` job in `ci.yml`)
 
 A lightweight check that runs on every tag push and fails if the tag name does not match
 the version in `Cargo.toml`:
@@ -250,10 +250,11 @@ the version in `Cargo.toml`:
 ```yaml
 verify-version-tag-sync:
   runs-on: ubuntu-latest
-  if: startsWith(github.ref, 'refs/tags/')
   steps:
-    - uses: actions/checkout@v4
+    - if: startsWith(github.ref, 'refs/tags/')
+      uses: actions/checkout@v4
     - name: Verify Cargo.toml version matches tag
+      if: startsWith(github.ref, 'refs/tags/')
       run: |
         TAG="${GITHUB_REF#refs/tags/v}"
         CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
@@ -266,6 +267,9 @@ verify-version-tag-sync:
 ### Manually-triggered release workflows
 
 #### `nauticalab/starfix` — new `.github/workflows/release.yml`
+
+`cargo-release` publishes the **Rust crate** to crates.io. The Python package `starfix`
+is a separate project and is released exclusively through `nauticalab/starfix-python`.
 
 ```yaml
 name: release
@@ -305,18 +309,20 @@ jobs:
 
       - name: Release
         run: cargo release ${{ inputs.version }} --execute --no-confirm
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 ```
 
 A GitHub App token (rather than `GITHUB_TOKEN`) is required for checkout so that the tag
-push from `cargo-release` triggers the downstream `maturin-release.yml` workflow.
+push from `cargo-release` triggers the downstream `ci.yml` workflow.
 `GITHUB_TOKEN`-pushed events do not trigger other workflows (GitHub's recursion guard).
 
 Required secrets: `RELEASE_APP_ID`, `RELEASE_APP_PRIVATE_KEY` — a GitHub App with
-`contents:write` on `nauticalab/starfix`.
+`contents:write` on `nauticalab/starfix`; `CARGO_REGISTRY_TOKEN` — a crates.io API token.
 
 **What this workflow does end-to-end:**
-1. `cargo-release` bumps `Cargo.toml` → commits → creates `v{version}` tag → pushes both
-2. Tag push fires `maturin-release.yml` → builds wheels → publishes to PyPI
+1. `cargo-release` bumps `Cargo.toml` → commits → publishes crate to crates.io → creates `v{version}` tag → pushes both
+2. Tag push fires `ci.yml` → runs tests and verifies version/tag sync
 
 #### `nauticalab/starfix-python` — new `.github/workflows/release.yml`
 
