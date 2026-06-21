@@ -33,7 +33,7 @@ _FIXTURE_PATH = Path(__file__).parent / "golden" / "include_metadata_v0.3.json"
 
 
 def _load_vectors() -> list[dict[str, Any]]:
-    with _FIXTURE_PATH.open() as f:
+    with _FIXTURE_PATH.open(encoding="utf-8") as f:
         return json.load(f)["vectors"]
 
 
