@@ -61,16 +61,29 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Tag release
-        run: |
-          git tag "v${{ steps.normalize.outputs.version }}"
-          git push origin "v${{ steps.normalize.outputs.version }}"
+      # Create the tag locally so hatch-vcs can derive the package version during
+      # `uv build`. The tag is pushed to origin only AFTER a successful build to
+      # avoid leaving a dangling remote tag if the build fails.
+      - name: Create local release tag
+        run: git tag "v${{ steps.normalize.outputs.version }}"
 
       - name: Install uv
         uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081  # v5
 
       - name: Build wheel and sdist
         run: uv build
+
+      # Fail fast if the tag already exists on origin (e.g. re-running the workflow
+      # for the same version) before attempting to push, to surface a clear error
+      # rather than a confusing "already exists" git message.
+      - name: Push release tag
+        run: |
+          if git ls-remote --exit-code --tags origin \
+              "refs/tags/v${{ steps.normalize.outputs.version }}" > /dev/null 2>&1; then
+            echo "ERROR: tag v${{ steps.normalize.outputs.version }} already exists on origin" >&2
+            exit 1
+          fi
+          git push origin "v${{ steps.normalize.outputs.version }}"
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -79,6 +92,11 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # IMPORTANT: The PyPI and TestPyPI Trusted Publisher configurations must reference
+  # this workflow file (`.github/workflows/release.yml`). If they still point to the
+  # former `publish.yml`, OIDC token exchange will be rejected by PyPI/TestPyPI.
+  # Update both configs at https://pypi.org and https://test.pypi.org before running
+  # this workflow for the first time.
   publish-testpypi:
     name: Publish → TestPyPI
     needs: build

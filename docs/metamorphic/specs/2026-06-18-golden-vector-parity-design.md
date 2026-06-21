@@ -326,47 +326,22 @@ Required secrets: `RELEASE_APP_ID`, `RELEASE_APP_PRIVATE_KEY` — a GitHub App w
 1. `cargo-release` bumps `Cargo.toml` → commits → publishes crate to crates.io → creates `v{version}` tag → pushes both
 2. Tag push fires `ci.yml` → runs tests and verifies version/tag sync
 
-#### `nauticalab/starfix-python` — new `.github/workflows/release.yml`
+#### `nauticalab/starfix-python` — `.github/workflows/release.yml`
 
 `hatch-vcs` reads the version from git tags automatically; there is no version file to
-bump. The release workflow only needs to create and push the tag:
+bump. The release workflow handles the full pipeline: tests, build, TestPyPI → PyPI
+publish, and GitHub Release creation. No GitHub App token is needed — `GITHUB_TOKEN`
+with `contents: write` is sufficient for the tag push.
 
-```yaml
-name: release
-on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version (e.g. 0.3.0)'
-        required: true
-        type: string
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+The tag is created locally first (so `hatch-vcs` can derive the version during `uv build`),
+then pushed to origin only after a successful build to avoid leaving a dangling remote tag
+on build failure.
 
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ steps.app-token.outputs.token }}
+Job sequence: `test` (matrix 3.10/3.11/3.12) → `build` (local tag + build + push tag) →
+`publish-testpypi` → `publish-pypi` (PyPI publish + GitHub Release).
 
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Tag and push release
-        run: |
-          git tag v${{ inputs.version }}
-          git push origin v${{ inputs.version }}
-```
-
-Tag push fires the existing `publish.yml` → pure-Python package published to PyPI.
+> **Note:** The PyPI and TestPyPI Trusted Publisher configurations must reference
+> `.github/workflows/release.yml`. Update both configs before triggering the first release.
 
 ### Release procedure (coordinated across both repos)
 

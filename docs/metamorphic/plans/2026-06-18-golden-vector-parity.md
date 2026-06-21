@@ -1092,9 +1092,15 @@ jobs:
           git push origin v${{ inputs.version }}
 ```
 
-Note: the tag push triggers `publish.yml` which runs tests, builds the wheel and sdist via `uv build`, and publishes to TestPyPI then PyPI using OIDC Trusted Publishing.
+Note: the merged `release.yml` handles the full pipeline — tests (matrix), build,
+TestPyPI → PyPI publish (OIDC Trusted Publishing), and GitHub Release creation. No
+GitHub App token is required; `GITHUB_TOKEN` with `contents: write` handles the tag
+push. The PyPI/TestPyPI Trusted Publisher configuration must reference `release.yml`
+(not the former `publish.yml`).
 
-Required secrets: `RELEASE_APP_ID`, `RELEASE_APP_PRIVATE_KEY` (GitHub App with `contents:write` on `nauticalab/starfix-python`).
+Required secrets: `STARFIX_APP_ID` + `STARFIX_APP_PRIVATE_KEY` (for `golden-sync-check`
+in `ci.yml`). The `RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY` secrets are no longer
+needed by `release.yml`.
 
 - [ ] **Step 2: Commit**
 
@@ -1124,9 +1130,9 @@ gh pr create \
 - Adds `tests/golden/include_metadata_v0.3.json` (copied from authoritative Rust fixture)
 - Adds `tests/test_golden_parity_metadata.py`: 9 parametrized cross-language parity tests + 2 invariant tests
 - Adds `golden-sync-check` CI job to `ci.yml` — fetches fixture from `nauticalab/starfix` main on every PR and fails on drift
-- Adds manual `release.yml` workflow using GitHub App token
+- Adds manual `release.yml` workflow: tests → build → TestPyPI → PyPI → GitHub Release (OIDC, no API token secrets needed)
 
-Requires `STARFIX_APP_ID` + `STARFIX_APP_PRIVATE_KEY` secrets (for drift check) and `RELEASE_APP_ID` + `RELEASE_APP_PRIVATE_KEY` secrets (for release workflow) to be set on the repo.
+Requires `STARFIX_APP_ID` + `STARFIX_APP_PRIVATE_KEY` secrets (for `golden-sync-check` drift check) to be set on the repo. Also requires the PyPI/TestPyPI Trusted Publisher configs to reference `.github/workflows/release.yml`.
 
 Part of PLT-1735. Companion PR: nauticalab/starfix (Rust side).
 
