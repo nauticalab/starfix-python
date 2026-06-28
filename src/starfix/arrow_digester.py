@@ -642,6 +642,10 @@ def _element_size_for_type(dt: pa.DataType) -> int | None:
         return 4
     if pa.types.is_time64(dt):
         return 8
+    if pa.types.is_timestamp(dt):
+        return 8  # int64 physical storage; unit/tz are schema metadata
+    if pa.types.is_duration(dt):
+        return 8  # int64 physical storage; unit is schema metadata
     if pa.types.is_decimal(dt):
         return dt.bit_width // 8
     if pa.types.is_fixed_size_binary(dt):

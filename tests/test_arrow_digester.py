@@ -67,6 +67,34 @@ class TestSchemaSerialization:
         # a_field should appear before z_field in the Struct array
         assert s.index('"a_field"') < s.index('"z_field"')
 
+    def test_timestamp_types_in_schema(self):
+        schema = pa.schema([
+            pa.field("ts_utc_s",  pa.timestamp("s",  tz="UTC"), nullable=False),
+            pa.field("ts_utc_ms", pa.timestamp("ms", tz="UTC"), nullable=False),
+            pa.field("ts_utc_us", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("ts_utc_ns", pa.timestamp("ns", tz="UTC"), nullable=False),
+            pa.field("ts_naive_us", pa.timestamp("us"), nullable=False),
+        ])
+        s = _serialized_schema(schema)
+        assert '{"Timestamp":["Second","UTC"]}' in s
+        assert '{"Timestamp":["Millisecond","UTC"]}' in s
+        assert '{"Timestamp":["Microsecond","UTC"]}' in s
+        assert '{"Timestamp":["Nanosecond","UTC"]}' in s
+        assert '{"Timestamp":["Microsecond",null]}' in s
+
+    def test_duration_types_in_schema(self):
+        schema = pa.schema([
+            pa.field("dur_s",  pa.duration("s"),  nullable=False),
+            pa.field("dur_ms", pa.duration("ms"), nullable=False),
+            pa.field("dur_us", pa.duration("us"), nullable=False),
+            pa.field("dur_ns", pa.duration("ns"), nullable=False),
+        ])
+        s = _serialized_schema(schema)
+        assert '{"Duration":"Second"}' in s
+        assert '{"Duration":"Millisecond"}' in s
+        assert '{"Duration":"Microsecond"}' in s
+        assert '{"Duration":"Nanosecond"}' in s
+
 
 # ── Schema hashing (golden values from Rust) ──────────────────────────
 
