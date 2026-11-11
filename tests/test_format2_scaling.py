@@ -65,3 +65,26 @@ def test_traversal_count_does_not_grow_with_rows(monkeypatch) -> None:
         f2.hash_table(_nested_table(rows))
         counts.append(calls)
     assert counts[0] == counts[1], f"{counts[0]} visits for 10 rows, {counts[1]} for 10,000 rows"
+
+
+def test_nullable_list_of_binary_does_not_copy_the_payload() -> None:
+    """A list column with a null row is not filtered as a whole (no second payload copy).
+
+    Arrow allocations are invisible to tracemalloc, so they are measured on a fresh proxy of
+    the Arrow memory pool, made the default for the duration of the hash.
+    """
+    values = pa.array([b"x" * 1000] * 4000, pa.binary())  # 4 MB payload
+    offsets = pa.array(range(0, 4001, 4), pa.int32())
+    mask = pa.array([i == 0 for i in range(1000)])
+    table = pa.table({"c": pa.ListArray.from_arrays(offsets, values, mask=mask)})
+    payload = values.buffers()[2].size
+    f2.hash_table(table.slice(0, 2))  # warm up
+
+    default = pa.default_memory_pool()
+    pool = pa.proxy_memory_pool(default)
+    pa.set_memory_pool(pool)
+    try:
+        f2.hash_table(table)
+    finally:
+        pa.set_memory_pool(default)
+    assert pool.max_memory() < payload // 4, f"Arrow peak {pool.max_memory()} bytes for a {payload}-byte payload"

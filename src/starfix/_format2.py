@@ -468,10 +468,10 @@ def _hash_values(arr: pa.Array, bits: pa.Array | None, digest) -> None:
         for chunk_start in range(0, n, _CHUNK):
             chunk_end = min(chunk_start + _CHUNK, n)
             offs = offsets[chunk_start:chunk_end + 1].tolist()
-            pairs = zip(offs, offs[1:])
+            pairs = zip(offs, offs[1:], strict=False)  # consecutive offsets
             if bits is not None:
                 flags = bits.slice(chunk_start, chunk_end - chunk_start).to_pylist()
-                pairs = (pair for pair, ok in zip(pairs, flags) if ok)
+                pairs = (pair for pair, ok in zip(pairs, flags, strict=True) if ok)
             for a, b in pairs:
                 size_i = b - a
                 if size_i >= _BYTE_BUDGET:
@@ -492,45 +492,69 @@ def _hash_values(arr: pa.Array, bits: pa.Array | None, digest) -> None:
     raise ValueError(f"Hashing data of type {t} is not supported")  # checked earlier (Section 7)
 
 
-def _visit(field: pa.Field, arr: pa.Array, path: str, enclosing: pa.Array | None, entries: dict) -> None:
-    """Feed the elements `arr` of the node `field` at `path` into its entry (Section 3.2).
+def _visit(
+    field: pa.Field,
+    arr: pa.Array,
+    path: str,
+    enclosing: pa.Array | None,
+    entries: dict,
+    select: pa.Array | None = None,
+) -> None:
+    """Feed the elements of the node `field` at `path` into its entry (Section 3.2).
 
-    `enclosing` is the AND of the enclosing struct validities at this list level (None:
-    all valid).
+    `arr` holds the node's candidate elements; `select` (None: all) marks which of them are
+    elements at all: below a list, the items of valid list values (items of null or masked
+    list values are not visited). `enclosing` is the AND of the enclosing struct validities
+    at this list level (None: all valid). Nothing proportional to the payload is copied:
+    list children are zero-copy slices of the original values with a selection mask.
     """
     arr = _resolve(arr)
     entry = entries[path]
     own = arr.is_valid() if arr.null_count else None
     if own is not None and not field.nullable:
-        # Section 7 item 4: a null in a non-nullable node not masked by an enclosing struct null.
-        bad = own if enclosing is None else pc.or_(own, pc.invert(enclosing))
-        if not pc.all(bad).as_py():
+        # Section 7 item 4: a null in a non-nullable node not masked by an enclosing struct
+        # null (elements outside `select` are not elements and are ignored).
+        ok = own if enclosing is None else pc.or_(own, pc.invert(enclosing))
+        if select is not None:
+            ok = pc.or_(ok, pc.invert(select))
+        if not pc.all(ok).as_py():
             raise ValueError(f"Non-nullable field {path!r} contains nulls")
     bits = _and(own, enclosing)
 
     if entry.validity is not None:
         if bits is None:
-            entry.validity.append_true(len(arr))
+            entry.validity.append_true(len(arr) if select is None else (pc.sum(select).as_py() or 0))
         else:
-            entry.validity.append_bitmap(bits.buffers()[1], bits.offset, len(bits))
+            written = bits if select is None else bits.filter(select)
+            entry.validity.append_bitmap(written.buffers()[1], written.offset, len(written))
 
     if entry.kind == "struct":
         t = arr.type
         for i in range(t.num_fields):
             child = t.field(i)
-            _visit(child, arr.field(i), f"{path}/{child.name}", bits, entries)
+            _visit(child, arr.field(i), f"{path}/{child.name}", bits, entries, select)
         return
 
+    present = _and(bits, select)  # elements that are visited and valid (None: all)
     if entry.kind == "list":
-        valid = arr if bits is None else arr.filter(bits)
-        if len(valid):
-            lengths = pc.cast(valid.value_lengths(), pa.uint64())
-            entry.lengths.update(memoryview(lengths.buffers()[1])[lengths.offset * 8:(lengths.offset + len(lengths)) * 8])
-        # Items of valid list values only; list boundaries reset struct validity.
-        _visit(arr.type.value_field, valid.flatten(), path + "/", None, entries)
+        lengths = arr.value_lengths()
+        if present is not None:
+            lengths = lengths.filter(present)
+        if len(lengths):
+            lengths = pc.cast(lengths, pa.uint64())
+            entry.lengths.update(
+                memoryview(lengths.buffers()[1])[lengths.offset * 8:(lengths.offset + len(lengths)) * 8]
+            )
+        # The items of all list values, as a zero-copy slice of the child, with the items of
+        # null (or not visited) list values deselected. List boundaries reset `enclosing`.
+        offsets = arr.offsets
+        first, last = offsets[0].as_py(), offsets[len(arr)].as_py()
+        items = arr.values.slice(first, last - first)
+        item_select = None if present is None else pc.take(present, pc.list_parent_indices(arr))
+        _visit(arr.type.value_field, items, path + "/", None, entries, item_select)
         return
 
-    _hash_values(arr, bits, entry.values)
+    _hash_values(arr, present, entry.values)
 
 
 def _is_unsupported_data(t: pa.DataType) -> bool:
