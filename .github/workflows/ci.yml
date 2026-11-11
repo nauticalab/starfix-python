@@ -50,6 +50,24 @@ jobs:
           uv run --python 3.10 --with pyarrow==19.0.0 python -c "import pyarrow; assert pyarrow.__version__ == '19.0.0', pyarrow.__version__; print('pyarrow', pyarrow.__version__)"
           uv run --python 3.10 --with pyarrow==19.0.0 pytest tests/ -v
 
+  legacy-differential:
+    # starfix.legacy.v0_4 must stay byte-identical to the released starfix-python 0.4.0 (PyPI).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081  # v5
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --dev --python 3.12
+
+      - name: Compare starfix.legacy.v0_4 with starfix==0.4.0 from PyPI
+        run: uv run --python 3.12 python scripts/legacy_differential.py
+
   license-check:
     runs-on: ubuntu-latest
     steps:

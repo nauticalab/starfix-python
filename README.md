@@ -107,8 +107,50 @@ every hash are the format number:
 | 1 | `00 00 01` | ≤ 0.4 | Lost information for some inputs (Booleans, nullable structs, lists of nullable lists or structs, row counts, and in Python a list of numeric dictionary values). |
 | 2 | `00 00 02` | 0.5 | Lossless layout, the two order options, rejections in every mode. |
 
-Format-1 hashes can be computed with starfix 0.4 (`pip install "starfix<0.5"` in a separate
-environment). Starfix 0.5 computes format 2 only.
+Format-1 hashes of starfix-python 0.4 are still available through the frozen
+[legacy 0.4 mode](#legacy-04-mode).
+
+## Legacy 0.4 mode
+
+```python
+from starfix.legacy.v0_4 import ArrowDigester as LegacyArrowDigester  # hash format 1
+
+old_key = LegacyArrowDigester.hash_table(table)   # 00 00 01 ..., as starfix-python 0.4.x
+```
+
+`starfix.legacy.v0_4` reproduces **starfix-python 0.4.0 byte for byte**: same API
+(`ArrowDigester(schema, *, include_metadata=False)`, `update`, `finalize`, `hash_schema`,
+`hash_record_batch`, `hash_table`, `hash_array`), same hashes, same exceptions. It exists **only
+to read or match data hashed by starfix-python 0.4.x** (for example to find stored data under
+its old key). **Never hash new data with it**: use `starfix.ArrowDigester`.
+
+It is frozen: never fixed and never extended (no order options). Its code is the 0.4.0 module
+verbatim, kept apart from the format-2 code. Its output is pinned by the restored 0.4.0 tests and golden file, and by a differential
+test against the released `starfix==0.4.0` package.
+
+Known defects, kept on purpose (all fixed in format 2):
+
+- Booleans are bit-packed per batch without a count: `[true]` and `[true, false, false]` in a
+  non-nullable column hash the same, and splitting rows into batches can change the hash.
+- A null struct hashes like a struct whose fields are all null, and null struct rows vanish
+  under non-nullable fields.
+- A list whose element is a nullable list loses its own lengths; a list of nullable structs
+  does not distinguish a null element.
+- The row count of zero-column tables and empty structs is not hashed.
+- A list of dictionary-encoded fixed-width values (for example `list<dictionary<int32, int64>>`)
+  hashes the dictionary indices instead of the values.
+
+starfix-python 0.4 also differed from the Rust crate 0.4 on these inputs. The legacy mode keeps
+the **Python** behaviour, because that is what data hashed with starfix-python 0.4 used:
+
+| Input | starfix-python 0.4 (legacy mode) | Rust starfix 0.4 |
+|---|---|---|
+| schema with a `Map` column | Map JSON without the value type and `keys_sorted` | entries field (key and value) and `keys_sorted` |
+| `include_metadata` with metadata on map fields | value field metadata at `m/`; key ignored | entries field metadata at `m/` |
+| `hash_array` of a struct with non-ASCII field names | names escaped as `\uXXXX` | raw UTF-8 |
+| schema with `Null`, `Interval`, `Utf8View` or `BinaryView` columns | raises `NotImplementedError` | hashes |
+| list of dictionary-encoded fixed-width values | hashes the dictionary indices | hashes the values |
+| streamed batch whose schema differs from the digester's | accepted | rejected |
 
 ## License
 

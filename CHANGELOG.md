@@ -39,6 +39,11 @@ buffers: at 1M rows, `list<int32>` takes about 20 ms instead of an estimated 90 
 
 ### Added
 
+- **Legacy 0.4 mode**, `starfix.legacy.v0_4`: the starfix-python 0.4.0 hasher (format 1),
+  byte for byte, frozen, for reading or matching data hashed by 0.4.x only. Never use it for
+  new data. Pinned by the restored 0.4.0 tests and golden file and by a differential test
+  against the released `starfix==0.4.0`.
+
 - Keyword-only options `ordered_columns` and `ordered_struct_fields` on `ArrowDigester(...)`,
   `hash_schema`, `hash_record_batch`, `hash_table` and `hash_array`: make column order and
   struct field order (at every depth) part of the hash. Default off.
