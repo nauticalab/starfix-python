@@ -156,6 +156,7 @@ def test_example_1_record_batch() -> None:
         u64(2) + b"\x01",
         sha(u64(1) + b"x"),
     )
+    assert (V + final).hex() == "0000028934d60de8eb8c21ca04b859c02d21015032cb53ee029a4702281f2b0d5822bd"  # printed
     assert f2.hash_record_batch(batch) == V + final
 
 
@@ -235,6 +236,7 @@ def test_example_4_as_printed_with_non_nullable_child() -> None:
 
 def test_example_5_hash_array() -> None:
     expected = V + sha(ha(), b'"Int32"', u64(3), all_valid(3), sha(i32(1, 2, 3)))
+    assert expected.hex() == "0000028e4c60ec932ba53b9f514d4f6953091bed36d7295ad1d4cdde10907b83bf550f"  # printed
     assert f2.hash_array(pa.array([1, 2, 3], pa.int32())) == expected
     boolean = V + sha(ha(), b'"Boolean"', u64(3), u64(3) + b"\x05", sha(b"\x01\x00"))
     assert f2.hash_array(pa.array([True, None, False])) == boolean
