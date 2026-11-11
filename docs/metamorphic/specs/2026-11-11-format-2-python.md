@@ -15,8 +15,16 @@ This note records only the Python-specific decisions.
 ## Implementation
 
 - `src/starfix/_format2.py` implements the spec, written from the spec text alone.
-  `ArrowDigester` (`src/starfix/arrow_digester.py`) is a thin public wrapper. No format-1 code
-  is kept: format-1 hashes are computed with starfix 0.4.
+  `ArrowDigester` (`src/starfix/arrow_digester.py`) is a thin public wrapper, format 2 only.
+- Format 1 stays available through the frozen **legacy 0.4 mode**, `starfix.legacy.v0_4`
+  (`src/starfix/legacy/v0_4.py`): starfix-python v0.4.0's hasher verbatim except one marked,
+  performance-only line, for reading or matching data hashed by 0.4.x (developer decision
+  2026-11-11; no separate 0.4 installation is needed). It is deliberately kept, not obsolete:
+  it is physically separate from the format-2 code (no imports either way), its sha256 is
+  pinned by `tests/test_legacy_v0_4_frozen.py`, its output by the restored v0.4.0 tests
+  (`tests/test_legacy_v0_4_*.py`, including `include_metadata_v0.3.json`), and its
+  byte-identity with the released `starfix==0.4.0` by `scripts/legacy_differential.py` (CI job
+  `legacy-differential`). It is never fixed or extended.
 - Data is processed per node and per batch on Arrow buffers (`filter`, `flatten`,
   `value_lengths`, validity bitmaps appended at arbitrary bit offsets, fixed-width values as
   buffer slices, strings and binary from the offsets and data buffers in bounded chunks). Every
@@ -28,8 +36,9 @@ This note records only the Python-specific decisions.
   `pa.ExtensionType` subclasses, `__arrow_ext_serialize__()`. pyarrow's natively registered
   canonical types (`arrow.uuid`, `arrow.fixed_shape_tensor`, ...) have no Python serializer, so
   their metadata is read from the field exported through the Arrow C data interface
-  (`ArrowSchema.metadata`, a fixed ABI). The spec defines their hash only for the canonical
-  stored form.
+  (`field.__arrow_c_schema__()`, `ArrowSchema.metadata`). The spec defines their hash only for
+  the canonical stored form. The same reader detects duplicate metadata keys, which are
+  rejected with `include_metadata`.
 - Validity bits, lengths and values follow the spec's one rule. Effective validity (own AND
   enclosing struct validity) is computed for every node and written for nullable nodes only.
 
@@ -39,8 +48,10 @@ This note records only the Python-specific decisions.
   from the literal SHA-256 inputs; primitive forms, JSON text rules, metadata paths, names not
   hashed, invariants, every rejection, streaming, extension types, dictionary nullability, and
   slicing at offsets around byte and word boundaries.
-- `tests/test_golden_parity_format2.py`: every vector and relation of `format2_v0.5.json`.
-  The only skips are version-gated (vectors an older installed pyarrow cannot decode).
+- `tests/test_golden_parity_format2.py`: every vector and relation of `format2_v0.5.json`
+  must match, with no skips and no expected failures (pyarrow >= 19, the supported minimum,
+  decodes every vector; CI also runs the suite on exactly pyarrow 19.0.0). The test asserts
+  minimum vector and relation counts, and an empty parametrization fails at collection.
 - The hand-coded literals of the older test files were moved to Rust-produced format-2 values
   (`format1_to_format2.json`). Literals that file did not cover had their inputs recovered by
   recording the calls that produced them (`python_literals_format1_inputs.json`), so Rust could
