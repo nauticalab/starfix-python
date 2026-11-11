@@ -131,6 +131,14 @@ rebuilds the type from them, so starfix-python hashes what pyarrow can observe:
 `TypeError` is raised for a wrong container type, for example a `Table` passed to
 `hash_record_batch` or a `RecordBatch` passed to `hash_table`.
 
+## Platforms
+
+Hash format 2 is defined over little-endian buffers (all lengths, counts and values are
+little-endian). starfix-python hashes Arrow buffers as stored, which is correct on
+little-endian hosts (x86-64, ARM64 and nearly all others). On a big-endian host every
+format-2 entry point raises `NotImplementedError` instead of producing wrong hashes. The Rust
+crate has the same restriction.
+
 ## Performance
 
 Hashing takes time linear in the data size and works on Arrow buffers (bounded temporary

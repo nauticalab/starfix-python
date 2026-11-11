@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+import sys
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -30,6 +31,17 @@ KIND_RECORDS = b"R"  # record batch / stream / table final digest
 KIND_ARRAY = b"A"  # hash_array
 
 _SCHEMA_MISMATCH = "Record batch schema does not match ArrowDigester schema"
+
+# Section 13: hashes are defined over little-endian buffers, and values are hashed as stored
+# in Arrow's native-endian buffers, so big-endian hosts are refused rather than mis-hashed.
+_LITTLE_ENDIAN_HOST = sys.byteorder == "little"
+
+
+def _require_little_endian() -> None:
+    if not _LITTLE_ENDIAN_HOST:
+        raise NotImplementedError(
+            "starfix hash format 2 is defined over little-endian buffers; big-endian hosts are not supported"
+        )
 _U64 = struct.Struct("<Q")
 _CHUNK = 1 << 16  # Booleans per chunk when expanding them to one byte each
 _BYTE_BUDGET = 1 << 20  # bytes per digest update when serializing variable-length values
@@ -719,6 +731,7 @@ class Digester:
         ordered_columns: bool = False,
         ordered_struct_fields: bool = False,
     ) -> None:
+        _require_little_endian()
         _require(schema, pa.Schema, "ArrowDigester", "a pyarrow.Schema")
         self._flags = flags_of(ordered_columns, ordered_struct_fields)
         self._include_metadata = include_metadata
@@ -763,6 +776,7 @@ def _require(obj, cls, entry_point: str, expected: str) -> None:
 
 def hash_schema(schema: pa.Schema, *, include_metadata: bool = False, ordered_columns: bool = False,
                 ordered_struct_fields: bool = False) -> bytes:
+    _require_little_endian()
     _require(schema, pa.Schema, "hash_schema", "a pyarrow.Schema")
     return VERSION_BYTES + schema_digest(schema, include_metadata, flags_of(ordered_columns, ordered_struct_fields))
 
@@ -788,6 +802,7 @@ def hash_array(array: pa.Array, *, ordered_columns: bool = False, ordered_struct
     Its validity is always written: the logical validity after decoding dictionaries (a
     valid dictionary key that points at a null dictionary value is a null).
     """
+    _require_little_endian()
     _require(array, (pa.Array, pa.ChunkedArray), "hash_array", "a pyarrow.Array or pyarrow.ChunkedArray")
     flags = flags_of(ordered_columns, ordered_struct_fields)
     root = pa.field("", array.type, nullable=True)

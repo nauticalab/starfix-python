@@ -930,3 +930,44 @@ def test_bits_restore_after_partial_appends() -> None:
         reference = _Bits()
         reference.append_true(prefix + 2)
         assert bits._len == reference._len and bytes(bits._bytes) == bytes(reference._bytes), prefix
+
+
+# ── Spec re-read at starfix 9c9a88c ──────────────────────────────────────
+
+
+def test_dictionary_validity_is_decoded_at_any_depth() -> None:
+    """A valid index pointing at a null value is a null element, below the root too."""
+    d = pa.DictionaryArray.from_arrays(pa.array([0, 1, 0], pa.int8()), pa.array(["a", None]))
+    plain = pa.array(["a", None, "a"])
+    s_dict = pa.StructArray.from_arrays([d], names=["c"])
+    s_plain = pa.StructArray.from_arrays([plain], names=["c"])
+    assert f2.hash_record_batch(pa.record_batch([s_dict], names=["s"])) == f2.hash_record_batch(
+        pa.record_batch([s_plain], names=["s"])
+    )
+    l_dict = pa.ListArray.from_arrays(pa.array([0, 2, 3], pa.int32()), d)
+    l_plain = pa.ListArray.from_arrays(pa.array([0, 2, 3], pa.int32()), plain)
+    assert f2.hash_record_batch(pa.record_batch([l_dict], names=["l"])) == f2.hash_record_batch(
+        pa.record_batch([l_plain], names=["l"])
+    )
+    assert f2.hash_record_batch(pa.record_batch([d], names=["c"])) == f2.hash_record_batch(
+        pa.record_batch([plain], names=["c"])
+    )
+
+
+def test_fixed_size_list_element_node_claims_its_path() -> None:
+    with pytest.raises(ValueError, match="Ambiguous node path 'f/'"):
+        f2.hash_schema(pa.schema([pa.field("f", pa.list_(pa.int8(), 2)), pa.field("f/", pa.int8())]))
+
+
+def test_big_endian_hosts_are_refused(monkeypatch) -> None:
+    """Section 13: hashes are defined over little-endian buffers; values are hashed as stored."""
+    monkeypatch.setattr(f2, "_LITTLE_ENDIAN_HOST", False)
+    schema = pa.schema([pa.field("a", pa.int32())])
+    for call in (
+        lambda: f2.hash_schema(schema),
+        lambda: f2.Digester(schema),
+        lambda: f2.hash_record_batch(pa.record_batch([pa.array([1], pa.int32())], schema=schema)),
+        lambda: f2.hash_array(pa.array([1], pa.int32())),
+    ):
+        with pytest.raises(NotImplementedError, match="little-endian"):
+            call()
