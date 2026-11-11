@@ -134,11 +134,23 @@ def _data_type_to_value(dt: pa.DataType, flags: int = 0) -> object:
         return {"Map": [_inner_field_to_value(dt.key_field.with_name("entries")), False]}
 
     # Primitive / leaf types – must match Arrow-Rust serde
-    return _primitive_data_type_string(dt)
+    return _primitive_data_type_string(dt, flags)
 
 
-def _primitive_data_type_string(dt: pa.DataType) -> object:
-    """Return the serde_json representation that arrow-rs produces."""
+# Spec Section 2.1 forms of types that the historical (flags == 0) serializer rejects.
+# They are used only when an option is on, so default-mode behaviour is unchanged.
+_V05_ONLY_TYPE_FORMS = {
+    "null": "Null",
+    "month_interval": {"Interval": "YearMonth"},
+    "day_time_interval": {"Interval": "DayTime"},
+    "month_day_nano_interval": {"Interval": "MonthDayNano"},
+    "string_view": "Utf8View",
+    "binary_view": "BinaryView",
+}
+
+
+def _primitive_data_type_string(dt: pa.DataType, flags: int = 0) -> object:
+    """Return the serde_json representation that arrow-rs produces (spec Section 2.1)."""
     import pyarrow as pa
 
     _simple = {
@@ -194,6 +206,9 @@ def _primitive_data_type_string(dt: pa.DataType) -> object:
 
     if pa.types.is_fixed_size_binary(dt):
         return {"FixedSizeBinary": dt.byte_width}
+
+    if flags and str(dt) in _V05_ONLY_TYPE_FORMS:
+        return _V05_ONLY_TYPE_FORMS[str(dt)]
 
     raise NotImplementedError(f"Unsupported data type: {dt}")
 
@@ -353,7 +368,7 @@ def _sort_metadata(metadata) -> dict[str, str]:
 
 
 def _collect_nested_field_metadata(
-    field, path: str
+    field, path: str, flags: int = 0
 ) -> dict[str, dict[str, str]]:
     """Recursively collect metadata from a field and its nested children.
 
@@ -364,8 +379,10 @@ def _collect_nested_field_metadata(
     - Struct children:                          "{parent_path}/{child_name}"
     - List/LargeList/FixedSizeList/Map element: "{parent_path}/"  (trailing slash, no element name)
 
-    For Map types, only the value/item field is traversed; Map key fields are
-    intentionally skipped (no path exists for them in the data-hashing BTreeMap).
+    For Map types with ``flags == 0`` (historical form), only the value/item field
+    is traversed, at "{parent_path}/"; Map key fields are skipped. With any option
+    on (spec Section 2.2.1), a map's element is its entries field: entries at
+    "{parent_path}/", key at "{parent_path}//key", value at "{parent_path}//value".
     """
     import pyarrow as pa
 
@@ -378,22 +395,23 @@ def _collect_nested_field_metadata(
         for i in range(field.type.num_fields):
             child = field.type.field(i)
             child_path = f"{path}{DELIMITER}{child.name}"
-            result.update(_collect_nested_field_metadata(child, child_path))
+            result.update(_collect_nested_field_metadata(child, child_path, flags))
     elif (
         pa.types.is_list(field.type)
         or pa.types.is_large_list(field.type)
         or pa.types.is_fixed_size_list(field.type)
     ):
         element_path = f"{path}{DELIMITER}"
-        result.update(_collect_nested_field_metadata(field.type.value_field, element_path))
+        result.update(_collect_nested_field_metadata(field.type.value_field, element_path, flags))
     elif pa.types.is_map(field.type):
         element_path = f"{path}{DELIMITER}"
-        result.update(_collect_nested_field_metadata(field.type.item_field, element_path))
+        element = field.type.field(0) if flags else field.type.item_field
+        result.update(_collect_nested_field_metadata(element, element_path, flags))
 
     return dict(sorted(result.items()))
 
 
-def _update_metadata_hash(hasher: _Hasher, schema: pa.Schema) -> None:
+def _update_metadata_hash(hasher: _Hasher, schema: pa.Schema, flags: int = 0) -> None:
     """Feed Phase 2 metadata JSON into ``hasher`` (only when metadata is present).
 
     Builds a compact JSON string of the form:
@@ -411,7 +429,7 @@ def _update_metadata_hash(hasher: _Hasher, schema: pa.Schema) -> None:
     all_field_meta: dict[str, dict[str, str]] = {}
     for i in range(len(schema)):
         field = schema.field(i)
-        all_field_meta.update(_collect_nested_field_metadata(field, field.name))
+        all_field_meta.update(_collect_nested_field_metadata(field, field.name, flags))
 
     meta_doc: dict[str, object] = {}
     if all_field_meta:
@@ -437,7 +455,7 @@ def _schema_key(schema: pa.Schema, include_metadata: bool, flags: int) -> tuple[
     """Everything a schema contributes to the schema digest (spec 9.7 check key)."""
     phase2 = _BytesCollector()
     if include_metadata:
-        _update_metadata_hash(phase2, schema)
+        _update_metadata_hash(phase2, schema, flags)
     return _phase1_json(schema, flags), bytes(phase2.data)
 
 
@@ -450,7 +468,7 @@ def _hash_schema(schema: pa.Schema, include_metadata: bool = False, flags: int =
     else:
         h.update(_serialized_schema(schema).encode())
     if include_metadata:
-        _update_metadata_hash(h, schema)
+        _update_metadata_hash(h, schema, flags)
     return h.digest()
 
 

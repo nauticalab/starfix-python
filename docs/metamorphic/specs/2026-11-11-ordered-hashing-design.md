@@ -52,12 +52,10 @@ The name is not hashed, so no hash moves.
 
 ## Known default-mode divergences from Rust (not changed here)
 
-Found while implementing from the spec. All three predate ITL-898 and are present in the
+Found while implementing from the spec. All of these predate ITL-898 and are present in the
 released starfix-python 0.4.0. Fixing them moves released hashes, or rejects batches that are
 accepted today, which is the developer's decision. `tests/test_known_divergences.py` pins the
-Rust behaviour as `xfail(strict=True)` tests; the four affected golden vectors
-(`map_struct_ab_schema_f0`, `map_struct_ba_schema_f0`, `names_array_struct_f0`,
-`names_array_struct_int8_f0`) are marked the same way in `tests/test_golden_parity_ordered.py`.
+Rust behaviour as `xfail(strict=True)` tests; the affected default-mode golden vectors are marked the same way in `tests/test_golden_parity_ordered.py`.
 
 | Input | Python today (flags 0) | Rust |
 |---|---|---|
@@ -65,7 +63,19 @@ Rust behaviour as `xfail(strict=True)` tests; the four affected golden vectors
 | `hash_array` of a struct with a non-ASCII child name `é` | type JSON escapes it as the six ASCII characters `\u00e9` | raw UTF-8 (bytes `c3 a9`), spec 2.1 JSON text rules |
 | `update` with a batch whose schema differs (spec 9.7, no options) | accepted and hashed as given | rejected: Phase 1 JSON must match, plus the Phase 2 document with `include_metadata` |
 
-With any option on, Python matches Rust in all three cases.
+| `hash_schema` with `include_metadata` of a `Map` column with field metadata | value field metadata at `m/`, key skipped | entries at `m/`, key at `m//key`, value at `m//value` (spec 2.2.1) |
+| `hash_schema` of `Null`, `Interval`, `Utf8View`, `BinaryView` columns | raises `NotImplementedError` | spec 2.1 forms (`"Null"`, `{"Interval":"DayTime"}`, `"Utf8View"`, `"BinaryView"`) |
+
+With any option on, Python matches Rust in all of these cases (golden vectors `*_f0` above are
+strict xfails; their option-on counterparts pass).
+
+## pyarrow limitation
+
+pyarrow does not keep the metadata of a map's *entries* field when it reads Arrow IPC (key
+and value field metadata are kept; verified with pyarrow 26). The golden vectors
+`meta_map_entries_schema_f1_im1` and `meta_map_all_schema_f1_im1` therefore cannot be
+reproduced by any pyarrow-based implementation; they are strict xfails pending a decision in
+the Rust spec.
 
 ## Version
 

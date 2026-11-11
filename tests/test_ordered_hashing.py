@@ -292,6 +292,43 @@ class TestSpecSection2Examples:
         prefix = tag(flags) if flags else b""
         assert ArrowDigester.hash_schema(schema, **opts(flags)) == V + sha(prefix, json_)
 
+class TestTypeFormsAndMetadataPathsWithOptions:
+    """Spec 2.1 forms of Null/Interval/view types and 2.2.1 map metadata paths (options on)."""
+
+    @pytest.mark.parametrize(
+        "factory, form",
+        [
+            ("null", b'"Null"'),
+            ("month_day_nano_interval", b'{"Interval":"MonthDayNano"}'),
+            ("string_view", b'"Utf8View"'),
+            ("binary_view", b'"BinaryView"'),
+        ],
+    )
+    def test_type_forms(self, factory, form):
+        if not hasattr(pa, factory):  # view types need pyarrow >= 16
+            pytest.skip(f"pyarrow {pa.__version__} has no pa.{factory}()")
+        dt = getattr(pa, factory)()
+        schema = pa.schema([pa.field("c", dt, nullable=True)])
+        json_ = b'[{"data_type":' + form + b',"name":"c","nullable":true}]'
+        assert ArrowDigester.hash_schema(schema, ordered_columns=True) == V + sha(tag(0x01), json_)
+
+    def test_default_mode_still_rejects_these_types(self):
+        with pytest.raises(NotImplementedError):
+            ArrowDigester.hash_schema(pa.schema([pa.field("c", pa.null())]))
+
+    def test_map_key_and_value_metadata_paths(self):
+        key = pa.field("key", pa.utf8(), nullable=False, metadata={"role": "id"})
+        value = pa.field("value", pa.int32(), metadata={"unit": "kg"})
+        schema = pa.schema([pa.field("m", pa.map_(key, value), nullable=True)])
+        entries = (
+            b'{"data_type":{"Struct":[{"data_type":"LargeUtf8","name":"key","nullable":false},'
+            b'{"data_type":"Int32","name":"value","nullable":true}]},"name":"entries","nullable":false}'
+        )
+        phase1 = b'{"m":{"data_type":{"Map":[' + entries + b',false]},"nullable":true}}'
+        phase2 = b'{"fields":{"m//key":{"role":"id"},"m//value":{"unit":"kg"}}}'
+        got = ArrowDigester.hash_schema(schema, include_metadata=True, nested_validity=True)
+        assert got == V + sha(tag(0x04), phase1, phase2)
+
 # ── Spec Section 9.8: invariants ───────────────────────────────────────
 
 

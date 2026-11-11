@@ -107,13 +107,35 @@ _KNOWN_DEFAULT_MODE_DIVERGENCES = {
     "map_struct_ba_schema_f0": "default Map JSON omits the value type (known divergence)",
     "names_array_struct_f0": "default hash_array type JSON escapes non-ASCII (known divergence)",
     "names_array_struct_int8_f0": "default hash_array type JSON escapes non-ASCII (known divergence)",
+    # Types the historical serializer rejects (NotImplementedError); options on: supported.
+    "type_null_schema_f0": "default schema hashing rejects Null (known divergence)",
+    "type_interval_year_month_schema_f0": "default schema hashing rejects Interval (known divergence)",
+    "type_interval_day_time_schema_f0": "default schema hashing rejects Interval (known divergence)",
+    "type_interval_month_day_nano_schema_f0": "default schema hashing rejects Interval (known divergence)",
+    "type_utf8_view_schema_f0": "default schema hashing rejects Utf8View (known divergence)",
+    "type_binary_view_schema_f0": "default schema hashing rejects BinaryView (known divergence)",
+    # Default Phase 2 map paths: value metadata at "m/", key skipped (Rust: entries/key/value).
+    "meta_map_value_schema_f0_im1": "default Map metadata paths (known divergence)",
+    "meta_map_key_schema_f0_im1": "default Map metadata paths (known divergence)",
+    "meta_map_entries_schema_f0_im1": "default Map metadata paths (known divergence)",
+    "meta_map_all_schema_f0_im1": "default Map metadata paths (known divergence)",
 }
+
+# Vectors that no pyarrow-based implementation can reproduce: pyarrow drops the metadata
+# of a map's entries field when it reads an IPC stream (key and value metadata survive),
+# so the input Rust hashed is not visible to Python. Pending a decision in the Rust spec.
+_PYARROW_UNREPRESENTABLE = {
+    "meta_map_entries_schema_f1_im1": "pyarrow drops map entries-field metadata on IPC read",
+    "meta_map_all_schema_f1_im1": "pyarrow drops map entries-field metadata on IPC read",
+}
+
+_XFAIL_VECTORS = {**_KNOWN_DEFAULT_MODE_DIVERGENCES, **_PYARROW_UNREPRESENTABLE}
 
 
 def _vector_params() -> list[Any]:
     params = []
     for v in _vectors():
-        reason = _KNOWN_DEFAULT_MODE_DIVERGENCES.get(v["id"])
+        reason = _XFAIL_VECTORS.get(v["id"])
         marks = [pytest.mark.xfail(strict=True, reason=reason)] if reason else []
         params.append(pytest.param(v, id=v["id"], marks=marks))
     return params
@@ -141,18 +163,22 @@ def test_golden_vector(vector: dict[str, Any]) -> None:
     "relation", _relations(), ids=lambda r: f"{r['kind']}:{'|'.join(r['ids'])}"
 )
 def test_golden_relation(relation: dict[str, Any]) -> None:
-    """Each relation holds for the pinned values and for the live Python hashes."""
+    """Each relation holds for the pinned values and for the live Python hashes.
+
+    Live hashes are compared over the relation's vectors that Python reproduces; the
+    others (``_XFAIL_VECTORS``) are each covered by their own strict xfail above.
+    """
     by_id = {v["id"]: v for v in _vectors()}
     ids = relation["ids"]
     pinned = {i: by_id[i]["expected_hash"] for i in ids}
-    live = {i: _hash(by_id[i]) for i in ids}
+    live = {i: _hash(by_id[i]) for i in ids if i not in _XFAIL_VECTORS}
     for label, hashes in (("pinned", pinned), ("live", live)):
         if relation["kind"] == "equal":
-            assert len(set(hashes.values())) == 1, (
+            assert len(set(hashes.values())) <= 1, (
                 f"relation equal {ids} fails on {label} hashes: {hashes} ({relation.get('why', '')})"
             )
         else:
-            for a, b in itertools.combinations(ids, 2):
+            for a, b in itertools.combinations(list(hashes), 2):
                 assert hashes[a] != hashes[b], (
                     f"relation different {ids} fails on {label} hashes: '{a}' == '{b}' "
                     f"({relation.get('why', '')})"

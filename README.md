@@ -6,7 +6,7 @@ Produces stable SHA-256 hashes of Arrow tables, record batches, and arrays that 
 
 - **Column-order independent** by default — reordering columns or struct fields does not change the hash (opt-in order sensitivity: see [Hashing options](#hashing-options-order-sensitivity-and-nested-validity))
 - **Batch-split independent** — splitting data across batches does not change the hash
-- **Cross-language compatible** — identical hashes to the Rust implementation
+- **Cross-language compatible** — identical hashes to the Rust implementation for the supported types, with a few known exceptions when no hashing option is on (see [Rust compatibility](#rust-compatibility))
 
 ## Installation
 
@@ -65,15 +65,16 @@ A schema with no metadata produces the same hash regardless of `include_metadata
 
 Three further keyword-only options, all `False` by default, are accepted by
 `ArrowDigester(...)`, `hash_schema`, `hash_record_batch`, `hash_table` and
-`hash_array`. They have the same names as the Rust `HasherConfig` fields and
-produce byte-identical hashes (layout: starfix `docs/byte-layout-spec.md`,
-Section 9).
+`hash_array`. They have the same names as the Rust `HasherConfig` fields. With
+at least one of them on, hashes are byte-identical to Rust; the shared golden
+vectors in `tests/golden/ordered_v0.5.json` pin this (layout: starfix
+`docs/byte-layout-spec.md`, Section 9).
 
 | Option | Effect |
 |---|---|
 | `ordered_columns` | The order of the top-level columns is part of the hash. |
 | `ordered_struct_fields` | The order of struct fields, at every nesting depth (inside lists, struct children, …), is part of the hash. |
-| `nested_validity` | Every nullable struct, and every nullable list or struct that is a list element, records its own validity. A null struct then differs from a struct whose fields are all null, null struct rows are counted, and the outer lengths of a list of nullable lists are hashed. |
+| `nested_validity` | Every nullable struct, and every nullable list or struct that is a list element, records its own validity. A null struct then differs from a struct whose fields are all null, null struct rows are counted, and the outer lengths of a list of nullable lists are hashed. Every Boolean value (in any column, nullable or not) is also hashed as one byte per valid value. Without this option, `[true]` and `[true, false, false]` in a non-nullable Boolean column hash the same, and a Boolean column's hash depends on how its rows are split into batches. |
 
 ```python
 # A pa.Table whose column order and struct field order are part of its identity
@@ -112,6 +113,26 @@ Things to know:
   without it, the batch is accepted. The same holds for struct field order and
   `ordered_struct_fields`.
 - `include_metadata` works with every option as described above.
+
+## Rust compatibility
+
+With at least one hashing option on, every hash matches the Rust implementation
+byte for byte, with one exception: with `include_metadata`, metadata on a map's
+*entries* field is not seen, because pyarrow does not keep it when it reads Arrow
+data (key and value field metadata are kept). With all options off, the hashes are those of starfix-python 0.4.0,
+which differ from Rust in these cases (`tests/test_known_divergences.py` and the
+`_f0` entries marked as known divergences in `tests/test_golden_parity_ordered.py`):
+
+- schemas containing a `Map` column (the map's value type, `keys_sorted` and the
+  key / entries metadata paths are not hashed as Rust does);
+- `hash_array` of a struct whose field names contain non-ASCII characters;
+- schemas containing `Null`, `Interval`, `Utf8View` or `BinaryView` columns, which
+  raise `NotImplementedError` instead of hashing;
+- streaming: a batch whose schema differs from the digester's is accepted, while
+  Rust rejects it.
+
+Whether to align the default mode with Rust (which would move these existing
+Python hashes) is a separate decision.
 
 ## License
 
