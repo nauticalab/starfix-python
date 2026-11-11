@@ -1225,7 +1225,8 @@ def test_fixed_size_list_differs_from_list_and_from_other_sizes() -> None:
     """Maintainer decision: a fixed-size list is not type-identical to a variable-size list
     (List and LargeList are: both are LargeList in the canonical form)."""
     rows = [[1, 2], [3, 4]]
-    assert f2.hash_array(pa.array(rows, pa.list_(pa.int32()))) == f2.hash_array(pa.array(rows, pa.large_list(pa.int32())))
+    as_list, as_large_list = (pa.array(rows, t) for t in (pa.list_(pa.int32()), pa.large_list(pa.int32())))
+    assert f2.hash_array(as_list) == f2.hash_array(as_large_list)
     hashes = {f2.hash_array(pa.array(rows, t)) for t in (pa.list_(pa.int32(), 2), pa.list_(pa.int32()))}
     hashes.add(f2.hash_array(pa.array([b"\x01\x02", b"\x03\x04"], pa.binary(2))))
     hashes.add(f2.hash_array(pa.FixedSizeListArray.from_arrays(pa.array([1, 2, 3, 4], pa.int32()), 4)))

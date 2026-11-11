@@ -672,8 +672,8 @@ def _visit(
 
     `arr` holds the node's candidate elements; `select` (None: all) marks which of them are
     elements at all: below a list or fixed-size list, the items of valid list values (items
-    of null or masked list values are not visited). `enclosing` is the AND of the enclosing struct validities
-    at this list level (None: all valid). Value payloads (string/binary bytes, list
+    of null or masked list values are not visited). `enclosing` is the AND of the enclosing
+    struct validities at this list level (None: all valid). Value payloads (string/binary bytes, list
     children) are not copied: list children are zero-copy slices of the original values with
     a selection mask. Per-element metadata is still allocated: validity bitmaps, list lengths
     cast to u64, and list_parent_indices (8 bytes per list item).
