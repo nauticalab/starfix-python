@@ -1,8 +1,7 @@
-"""Hash format 2 of the starfix Arrow logical hasher (ITL-898, provisional).
+"""Hash format 2 of the starfix Arrow logical hasher (ITL-898).
 
 Implements ``nauticalab/starfix docs/byte-layout-spec.md`` (format 2) from the
 specification alone. Section numbers below refer to that document.
-
 """
 
 from __future__ import annotations
