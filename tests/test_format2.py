@@ -537,3 +537,42 @@ def test_builtin_uuid_extension_with_canonical_metadata() -> None:
     seen, batches = _ipc_roundtrip(stored, [batch])
     assert f2.hash_schema(seen, include_metadata=True) == f2.hash_schema(stored, include_metadata=True)
     assert f2.hash_record_batch(batches[0]) == f2.hash_record_batch(batch)
+
+
+# ── Review items from the Rust PR (dictionary nullability, offsets) ─────
+
+
+def test_hash_array_dictionary_nullability_counts_resolved_nulls() -> None:
+    """A valid key pointing at a null dictionary value is a null element."""
+    arr = pa.DictionaryArray.from_arrays(pa.array([0, 1], pa.int8()), pa.array(["a", None]))
+    assert arr.null_count == 0  # pyarrow counts index nulls only
+    expected = V + sha(header(0), b'"LargeUtf8"', u64(2), u64(2) + b"\x01", sha(u64(1) + b"a"))
+    assert f2.hash_array(arr) == expected
+
+
+def _offset_cases():
+    n = 200
+    bools = [None if i % 5 == 0 else i % 3 == 0 for i in range(n)]
+    ints = [None if i % 7 == 0 else i for i in range(n)]
+    strs = [None if i % 4 == 0 else "s" * (i % 5) for i in range(n)]
+    mask = [i % 6 == 0 for i in range(n)]
+    st = pa.StructArray.from_arrays(
+        [pa.array(bools, pa.bool_()), pa.array(ints, pa.int32()), pa.array(strs)],
+        names=["b", "i", "s"], mask=pa.array(mask),
+    )
+    lst = pa.array([None if i % 9 == 0 else bools[i:i + i % 4] for i in range(n)], pa.list_(pa.bool_()))
+    return st, lst
+
+
+@pytest.mark.parametrize("offset", [7, 8, 9, 16, 63, 64, 65])
+def test_slices_at_bit_and_byte_boundaries(offset: int) -> None:
+    """Leaves under nullable containers at array offsets around byte/word boundaries."""
+    st, lst = _offset_cases()
+    for arr in (st, lst):
+        sliced = arr.slice(offset, 50)
+        fresh = pa.array(sliced.to_pylist(), sliced.type)
+        assert sliced.offset == offset and fresh.offset == 0
+        assert f2.hash_array(sliced) == f2.hash_array(fresh), (arr.type, offset)
+        b_sliced = pa.record_batch([sliced], names=["c"])
+        b_fresh = pa.record_batch([fresh], names=["c"])
+        assert f2.hash_record_batch(b_sliced) == f2.hash_record_batch(b_fresh), (arr.type, offset)

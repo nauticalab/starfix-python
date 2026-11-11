@@ -539,9 +539,13 @@ def hash_table(table: pa.Table, **options: bool) -> bytes:
 
 
 def hash_array(array: pa.Array, *, ordered_columns: bool = False, ordered_struct_fields: bool = False) -> bytes:
-    """Section 4: the array is the node at path "" (nullable iff it has a null)."""
+    """Section 4: the array is the node at path "" (nullable iff it has a null).
+
+    Nulls are counted on the resolved values: a valid dictionary key that points at a
+    null dictionary value is a null (pyarrow's DictionaryArray.null_count counts keys).
+    """
     flags = flags_of(ordered_columns, ordered_struct_fields)
-    root = pa.field("", array.type, nullable=array.null_count > 0)
+    root = pa.field("", array.type, nullable=_resolve(array).null_count > 0)
     nodes = _walk([("", root)])
     entries = _new_entries(nodes)
     _visit(root, array, "", None, entries)
