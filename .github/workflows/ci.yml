@@ -110,8 +110,9 @@ jobs:
 
       - name: Fetch authoritative ordered fixture from starfix
         run: |
+          # Tolerate a missing file here so the next step prints the explanation.
           gh api repos/nauticalab/starfix/contents/tests/golden/ordered_v0.5.json \
-            --jq '.content' | base64 -d > /tmp/upstream_ordered.json
+            --jq '.content' | base64 -d > /tmp/upstream_ordered.json || true
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
