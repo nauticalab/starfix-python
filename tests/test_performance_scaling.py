@@ -34,10 +34,18 @@ def test_list_leaf_hashing_never_copies_the_shared_values_buffer() -> None:
     # Python objects), which must not count towards the peak.
     ArrowDigester.hash_table(_list_column(rows=2, per_row=2))
 
-    tracemalloc.start()
+    # Respect tracing started by the caller (e.g. -X tracemalloc): measure the peak
+    # above the current usage, and stop tracing only if this test started it.
+    started_here = not tracemalloc.is_tracing()
+    if started_here:
+        tracemalloc.start()
     try:
+        tracemalloc.reset_peak()
+        baseline, _ = tracemalloc.get_traced_memory()
         ArrowDigester.hash_table(table)
         _, peak = tracemalloc.get_traced_memory()
     finally:
-        tracemalloc.stop()
-    assert peak < buffer_size // 4, f"peak {peak} bytes: the shared values buffer was copied"
+        if started_here:
+            tracemalloc.stop()
+    growth = peak - baseline
+    assert growth < buffer_size // 4, f"peak grew by {growth} bytes: the shared values buffer was copied"
