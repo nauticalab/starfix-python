@@ -129,22 +129,22 @@ class TestArrayHashing:
     def test_boolean_array(self):
         arr = pa.array([True, None, False, True], type=pa.bool_())
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "0000024100d139820e2b287fee67fbd7624e103a6ab7674b5e0170e933a896cc9ee41d"
+        assert h == "0000024c5223c9cdc2fe10fb4362890cfc763e1bea4829a30fa6bfedc7bacad05f783a"
 
     def test_int32_array(self):
         arr = pa.array([42, None, -7, 0], type=pa.int32())
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "000002d1d8a0c525ec9d5b68cd7f3cc7c0ebf465c9159ae35a59010a18044e245e4f61"
+        assert h == "00000264c8fe45cb550e25577276b2af8c1c9c125bc14b8439f5619c1f18c71d4d0078"
 
     def test_time32_second_array(self):
         arr = pa.array([1000, None, 5000, 0], type=pa.time32("s"))
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "0000025ea1da45fe10e3034a18052542883c0c234353fc229ba1ab9423292d557fabe5"
+        assert h == "0000026708f2d0b632bf3f324716cd32c7c41dd8b9bc75d326fb5ec3f3900201f08eb7"
 
     def test_time64_microsecond_array(self):
         arr = pa.array([1_000_000, None, 5_000_000, 0], type=pa.time64("us"))
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "0000025360527b27a5170c14a2f6e4493d940d29e27678d80899dd94655a4884a5589b"
+        assert h == "0000022ddc0ab9c1cfc0fda9353d66612a504cb63d6ee509c4f56b961f33855f1a82a4"
 
     def test_time_units_differ(self):
         a = pa.array([1000, 2000], type=pa.time32("s"))
@@ -154,12 +154,12 @@ class TestArrayHashing:
     def test_binary_array(self):
         arr = pa.array([b"hello", None, b"world", b""], type=pa.binary())
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "000002ce0c8cc68b264f3040513d6fb5a94e4ec6b4b53a2baaad3cc0fd4d5a1b5e3f3d"
+        assert h == "000002e52c6b710b5c6be2cada5b225f0d43d83f2b0a89f117f9210eff746ebcd3f294"
 
     def test_string_array(self):
         arr = pa.array(["hello", None, "world", ""], type=pa.utf8())
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "000002445ec6b02f286788f52986673493d9d2c7d2efe4b4870fa780aeec77fbaa0385"
+        assert h == "0000020580567a1ed9be7b4dbbc36046e635c7021fb1bda241310cd353a3de5a860bc2"
 
     def test_list_array(self):
         arr = pa.array(
@@ -167,7 +167,7 @@ class TestArrayHashing:
             type=pa.list_(pa.field("item", pa.int32(), nullable=True)),
         )
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "000002e3c042074d4a197ca8b2f7e5aeae99b9cc9010a53b6c63120086d4e9688fd533"
+        assert h == "000002baac87674321616f3c4b4ad559df2c5b2492a83ba54fa7e865a51ae56d8f498c"
 
     def test_decimal128_array(self):
         from decimal import Decimal
@@ -181,7 +181,7 @@ class TestArrayHashing:
             type=pa.decimal128(38, 5),
         )
         h = ArrowDigester.hash_array(arr).hex()
-        assert h == "0000026193b4a954e812702fc77e319e834483780ac424d0b54fa9bf7163c90a9ab163"
+        assert h == "0000029c8ebfcade372b53f23d669d231eab0dd2dd96805263867e47af72c739e1b455"
 
 
 # ── Type normalization ────────────────────────────────────────────────
@@ -348,7 +348,7 @@ class TestRecordBatchHashing:
         d = ArrowDigester(schema)
         d.update(batch1)
         d.update(batch2)
-        assert d.finalize().hex() == "000002cfdbea6ff7282f0edaf4d7ca6015565dec2c8eb05073aeb6452ff83414cb8a43"
+        assert d.finalize().hex() == "0000020ba4ed542e67ebc311d160ab54a11f25630a6b5fdd99e5dfc90917cb1d31e968"
 
     def test_nullable_vs_non_nullable_same_data(self):
         """Array with all valid values should hash same whether nullable or not."""

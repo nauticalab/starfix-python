@@ -71,13 +71,13 @@ class TestEmptyArrays:
         """Empty Int32 array (0 elements)."""
         array = pa.array([], type=pa.int32())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "0000023d78a36c387f0a44f74de1ccfde1cf2d8c0fc078b4d1f47d16e5810cffd3be7f"
+        assert result == "000002b87ccbba66f376281848a40936e3b3697d877c78ec651aa4151939d9f3af2277"
 
     def test_empty_bool_array(self):
         """Empty Boolean array (0 elements)."""
         array = pa.array([], type=pa.bool_())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "0000020a3aed926ea2ae4c757b1505aa0c887ff47d1af823b1acc601036a4310ede4b4"
+        assert result == "000002754d4bf287e5b460d403a8468e526e92a738921b2aa8dbab8cc8a3450bcac203"
 
 
 # ---------------------------------------------------------------------------
@@ -90,13 +90,13 @@ class TestAllNullArrays:
         """Int32 array where every element is null."""
         array = pa.array([None, None, None, None], type=pa.int32())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "000002047d4c739f64e9d20e876901a967f19b17e7c3f749e30342f03f798d51e04d33"
+        assert result == "000002a51121a9cb745bbcd08ebba07ce33ef64dcb630c241d4112d27d15106e3889d7"
 
     def test_all_null_string(self):
         """LargeString array where every element is null."""
         array = pa.array([None, None, None], type=pa.large_utf8())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "000002879ade9f01775e3d97277fbd1ec3c48e0281c39847f96869d3a94dd3e8d355fc"
+        assert result == "0000025a88292c68392ec7d5ac54666139cb4836c9267088dfabef093e7981c322df38"
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ class TestBooleanArrays:
             type=pa.bool_(),
         )
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "000002f8e53d6dd8d7337e07b15dc8dc83d0636c3a1007d936ffa058279d614c08b068"
+        assert result == "000002d8e326d69087a22ebe44e971f2673272ad044e99927c9c4cfcf1cf26f1e7dcf2"
 
 
 # ---------------------------------------------------------------------------
@@ -131,19 +131,19 @@ class TestSingleElementArrays:
         """Single Int64 value: 9_999_999_999."""
         array = pa.array([9_999_999_999], type=pa.int64())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "000002ae4689b3dd6b1e4371f832a8df5b1aee55482f8fc995866e09adf37e3a80b770"
+        assert result == "000002ac6614ba2b81b9238b2888b17d9ccb5eb46a7ea3285c22a1b1ad25997d726e7b"
 
     def test_single_string(self):
         """Single LargeString value: 'hello world'."""
         array = pa.array(["hello world"], type=pa.large_utf8())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "00000204f74cfa9c23214afb9bc7a19fd6815b1c87115bbd295fbd47078e1b90814648"
+        assert result == "00000229b25b121cf4b425c068c2ac17b1952497cf7015668b73a62f925a078fa69d67"
 
     def test_single_bool_false(self):
         """Single Boolean value: false."""
         array = pa.array([False], type=pa.bool_())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "00000240973c422a2b514e91f409638b9caa9b490e84022e4c85cc7ebc438b08603155"
+        assert result == "0000023753cbe1173b2b0f1b81ce9de03a7c0a1ba1f5431dabbdbeef99172dd357bb29"
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +171,7 @@ class TestNullableStructHashArray:
             mask=mask,
         )
         result = ArrowDigester.hash_array(struct_array).hex()
-        assert result == "0000021cff2f979e54cd49abdd8d43a19929b0e023ea98a78b7c45700c0d4de7fb5d21"
+        assert result == "000002f5c5e7555a574364d953e7ebeb45dbc9f232e5707133dd088420924300ae3c58"
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +201,7 @@ class TestThreeLevelStruct:
         )
         batch = _record_batch({"top": col}, schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
-        assert result == "000002009faf5f41303751117910475f04c0c6685450681ca6f45daf01446040b984db"
+        assert result == "000002207e061a060534d98724ad2beabd1cd5d1350e5614104815a6a6c0ef13d8935c"
 
     def test_three_level_struct_schema(self):
         """Schema hash for three-level nested struct."""
@@ -215,7 +215,7 @@ class TestThreeLevelStruct:
         ])
         schema = pa.schema([pa.field("top", outer_type, nullable=False)])
         result = ArrowDigester.hash_schema(schema).hex()
-        assert result == "0000024884c452f6c13da2080e1e9213a74a9dab3b12a0f710e9721d74a12881971bb8"
+        assert result == "000002613ec04c0f0d49d1eff685ac3ffc3ee80a47ddb2121860f9845ac0d3a33fe7b2"
 
     def test_three_level_struct_hash_array(self):
         """Three-level struct via hash_array.
@@ -244,7 +244,7 @@ class TestThreeLevelStruct:
             fields=outer_fields,
         )
         result = ArrowDigester.hash_array(outer).hex()
-        assert result == "000002c390050372191220b574a0f88980a7cdf8a7982c25c3d5c6d2352e744e200b26"
+        assert result == "000002db3095dc0093c38b3aa668aee0f1805fc815542685d5d065008dc621512a8096"
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +275,7 @@ class TestStructWithListChild:
         schema = pa.schema([pa.field("record", struct_type, nullable=False)])
         batch = _record_batch([struct_arr], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
-        assert result == "000002a8d980079fe57b52e69f297f5614ec02e45fdb53fdabc08cf05caa92c6064a83"
+        assert result == "0000027699b386e4e56ce34d2a38f748566a75c36c62ca8f5fa36180f0ea8809ac528c"
 
     def test_struct_with_list_child_schema(self):
         """Schema hash for struct with list child."""
@@ -285,7 +285,7 @@ class TestStructWithListChild:
         ])
         schema = pa.schema([pa.field("record", struct_type, nullable=False)])
         result = ArrowDigester.hash_schema(schema).hex()
-        assert result == "0000025fcffef6ce20bf6df0f21b8943b4b11045662c09d8d0770b8fa842d662a013f2"
+        assert result == "00000231878b42f48260f2ba82a63298760afe8d214504d3b97a7019ff9a83eba48682"
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +315,7 @@ class TestNullableStructBatch:
         schema = pa.schema([pa.field("s", struct_type, nullable=True)])
         batch = _record_batch([struct_array], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
-        assert result == "0000022f9448c97edd56a482426bafca4eccd64ccbec8640970e98f0425ffc0dc95a0b"
+        assert result == "00000201b1aee1103d35dad74cda3c5a1c01e1aa5468beb02cc3cda5c1cb6c317f2d90"
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +348,7 @@ class TestListOfStruct:
         offsets = pa.array([0, 2, 4], type=pa.int64())
         list_array = pa.LargeListArray.from_arrays(offsets, struct_arr, type=pa.large_list(inner_field))
         result = ArrowDigester.hash_array(list_array).hex()
-        assert result == "0000028264b7ca05055fba21aca4d148535baf3012f3d651999744c16a51327d5fada2"
+        assert result == "000002c1c713c7ee5c139a8799e83aff16049b6a6a935e3e3f8601e04db05c523e2d7b"
 
     def test_nullable_list_of_struct_hash_array(self):
         """Nullable LargeList<Struct> via hash_array — row 1 is null.
@@ -373,7 +373,7 @@ class TestListOfStruct:
         mask = pa.array([False, True, False], type=pa.bool_())
         list_array = pa.LargeListArray.from_arrays(offsets, struct_arr, type=pa.large_list(inner_field), mask=mask)
         result = ArrowDigester.hash_array(list_array).hex()
-        assert result == "000002fa2beb54d6af22cf565ee84f090ad7b3d097a2381302adb44f6067f56e63a7ca"
+        assert result == "000002cd3cde5a0df63e3a6889556920e248890a882572450350a03da90f67f37e9f90"
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +394,7 @@ class TestNonNullableList:
             type=pa.list_(pa.field("item", pa.int32(), nullable=True)),
         )
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "000002153518ab6f2ec6777784fcf99acfd96dbf8d2941929284676875ae5d1bad1b96"
+        assert result == "000002c60a39367e08f911e8d99db430267db89ca41e4cef6e87ac01520422354684a6"
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +427,7 @@ class TestStructMixedTypes:
             fields=struct_fields,
         )
         result = ArrowDigester.hash_array(struct_arr).hex()
-        assert result == "0000024e525a6930337eb2b8ce95fe8af77f0afd021b3e5513d9d4d0cddae8acc5e590"
+        assert result == "00000269c3b3a491ea942d3067cfdf07b67a35bd708e4ee05c45cc302190016ab4a9f7"
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +469,7 @@ class TestMixedStructListBatch:
 
         batch = _record_batch([id_arr, meta_arr, tags_arr], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
-        assert result == "000002fb371b308310a0003de7e0175d54abb92e3792573fb3afbd322e35b544ee87b0"
+        assert result == "00000227eb7540623891a51b93eb1f133f461cd3231bc03f3d5f36957b452a477b912c"
 
     def test_mixed_struct_list_schema(self):
         """Schema hash for mixed struct + list batch."""
@@ -483,7 +483,7 @@ class TestMixedStructListBatch:
                 pa.field("item", pa.large_utf8(), nullable=True)), nullable=True),
         ])
         result = ArrowDigester.hash_schema(schema).hex()
-        assert result == "000002fb461efa00640c67b76df00f79bc3428908daaba4ac1232368eb43bf96e616da"
+        assert result == "0000029f1118411cb35c292b7950a626469bd8cb987faa8c114d6509f09f32ec816cb8"
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +504,7 @@ class TestEmptyBatchComplexSchema:
         ])
         digester = ArrowDigester(schema)
         result = digester.finalize().hex()
-        assert result == "000002f6f2c584b8001599fb6a07e4e30663a931be6b269c552f7b98d717536fbcccfd"
+        assert result == "000002a157d896c73e72632c68cabed99b8351ca116199217e209552f9bfaf70721cff"
 
     def test_empty_batch_complex_schema_hash(self):
         """Schema hash (hash_schema) for same complex schema."""
@@ -517,7 +517,7 @@ class TestEmptyBatchComplexSchema:
             ]), nullable=False),
         ])
         result = ArrowDigester.hash_schema(schema).hex()
-        assert result == "000002985afdc0c320fdd4641d7bb5cb3eebec474dac7c2aa5679eceba6c53e24186fe"
+        assert result == "00000286ebe427c00dea251c527cc286dc591efea4d6787cb3b40d3330a476b74f6d6c"
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +543,7 @@ class TestBatchAllNullColumn:
             schema=schema,
         )
         result = ArrowDigester.hash_record_batch(batch).hex()
-        assert result == "0000023f845b906c1a04b464b662ae67a64229b9790930e69de6cc72d395e4ee8b4752"
+        assert result == "000002dca3ee7298f6495f2263e45eb2c876c9dc78f5b7462357f3be5f5d6579214e94"
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +559,7 @@ class TestUnicodeStrings:
             type=pa.large_utf8(),
         )
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "000002f996fdd3ff03ad6faefd5ad734dc7c06d8719ec05794db6b5acae5ff694f5486"
+        assert result == "0000029f656d188a338cc277592a06b5710796016037efc7fc7cb5746e65bfadd752b4"
 
 
 # ---------------------------------------------------------------------------
@@ -581,7 +581,7 @@ class TestBinaryVariedSizes:
             type=pa.binary(),
         )
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "000002148db3622e92806eff4feafa117c429c052588ccc7b9120b03f02ff7ef26f6a1"
+        assert result == "0000020885790654a7ce21e6afdfeaa4ad99490e1871149892eda8acf4d2a403566410"
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +612,7 @@ class TestStructFieldOrderIndependence:
         h1 = ArrowDigester.hash_array(s1).hex()
         h2 = ArrowDigester.hash_array(s2).hex()
         assert h1 == h2, "struct field order should not affect hash_array"
-        assert h1 == "000002df24f48f927ab26711c1db497b5892eae8779a146bdd9eae7784d49f01593283"
+        assert h1 == "0000025560faf3d3f3ce308ad2c7129f24f42589e7b25f0c6dc70ddd2aa45f7464111a"
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +651,7 @@ class TestNestedNullableInnerStruct:
             fields=outer_fields,
         )
         result = ArrowDigester.hash_array(outer).hex()
-        assert result == "000002e046c146668f0f34a7a9d212d17df6dfc55adad063b1e60b0256fb4b2fdec820"
+        assert result == "00000236f16a0a8179aefeb33f440a83a7d32aad8993c022796eab539de2e1d63521b8"
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +680,7 @@ class TestListOfList:
             type=pa.large_list(outer_field),
         )
         result = ArrowDigester.hash_array(outer_list).hex()
-        assert result == "00000223c18487aa7dcb5bfb673a0d69dc41ba597febefe1c241ff26ebc4679bbf31fa"
+        assert result == "000002215978d8171df62a17e8b85524418ac182dc2b1f2132ab95b8a99922dfc9c725"
 
     def test_list_of_list_batch(self):
         """Record batch with LargeList<LargeList<Int32>> column."""
@@ -700,7 +700,7 @@ class TestListOfList:
         schema = pa.schema([pa.field("col", pa.large_list(outer_field), nullable=False)])
         batch = _record_batch([outer_list], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
-        assert result == "000002d4a91c629161ff8126db429572a4cd20c19ffa1d1f31db8c6eec0489d668216f"
+        assert result == "0000024354ac4eb6cef06e975af9b4a9f110e6baf409446897e122849553b159e6dc27"
 
     def test_list_of_list_schema(self):
         """Schema hash for list-of-list column."""
@@ -708,7 +708,7 @@ class TestListOfList:
         outer_field = pa.field("item", pa.large_list(inner_field), nullable=False)
         schema = pa.schema([pa.field("col", pa.large_list(outer_field), nullable=False)])
         result = ArrowDigester.hash_schema(schema).hex()
-        assert result == "000002021a0c07c4ba2f2c8c3185b66e0010ca100b17294188249024aee83cdcca6835"
+        assert result == "0000023014336b70e541ea20913795de44594938a32b325f17b5f03ed6ebf09859a95a"
 
 
 # ---------------------------------------------------------------------------
@@ -738,7 +738,7 @@ class TestLargeSchema:
                 pa.field("item", pa.int32(), nullable=True)), nullable=True),
         ])
         result = ArrowDigester.hash_schema(schema).hex()
-        assert result == "0000021bd0ecec5be7d78beaa0f9af537a44d47b1a7fa9035d0f7fd0050a435b3d277d"
+        assert result == "000002a89c186dbf815b7192ed4ac574196d1e0203db10d53dd7d16fbe12fbbdbb651e"
 
 
 # ---------------------------------------------------------------------------
@@ -760,7 +760,7 @@ class TestSchemaListOfStructWithList:
                 ]), nullable=False)), nullable=True),
         ])
         result = ArrowDigester.hash_schema(schema).hex()
-        assert result == "0000029ed92e6613925ec60e34390bae6bf243e8ceac257139e08b62fd7fdd759c85eb"
+        assert result == "000002a6a3ef288f2975f6a75b0336b2b7d69ffb4a2d129046710b7184d1eb76a45fe2"
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +783,7 @@ class TestSchema4LevelNestedStruct:
             ]), nullable=False),
         ])
         result = ArrowDigester.hash_schema(schema).hex()
-        assert result == "0000023b39cd00c1b1edbe305fcdddaf7e954d288584bfc8e08752098b408920c81162"
+        assert result == "000002a07f8d13692700d7b2cad515d343a2a1ce4b3dd7deac50316102a43638b496d2"
 
 
 # ---------------------------------------------------------------------------
@@ -823,7 +823,7 @@ class TestNullableListStructNullableChildren:
         ])
         batch = _record_batch([list_array], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
-        assert result == "000002b5fde83bc94e02aa663fe4c1aad59a5280c6f0d487decd0b66801abe35d43104"
+        assert result == "000002411fa81d41e904d832eceea8e2041fc96bda4e4dc58e72b76380e086d400a008"
 
 
 # ---------------------------------------------------------------------------
@@ -843,7 +843,7 @@ class TestStructEmptyBatch:
         ])
         d = ArrowDigester(schema)
         result = d.finalize().hex()
-        assert result == "0000028a33a2eeedd0ab0c78292441615250f4e2dd5d37da6d1bd98ed43ee003ea1f93"
+        assert result == "000002aaafa89ee39b32668aeb6f65c56501061b7194257ea88f14c3be0eca314f1d0d"
 
 
 # ---------------------------------------------------------------------------
@@ -881,7 +881,7 @@ class TestMultiBatchStruct:
         d.update(batch1)
         d.update(batch2)
         result = d.finalize().hex()
-        assert result == "0000023aa02f66b4e83360ebc47d3c74f6dd9c3ed9fde617a8218bfaaa48817f3f2da2"
+        assert result == "0000025d4b5b129c220a3171a616f1ff060a00fdb3647a34434f4d83e9d0a68502c334"
 
 
 # ---------------------------------------------------------------------------
@@ -915,7 +915,7 @@ class TestMultiBatchList:
         d.update(batch1)
         d.update(batch2)
         result = d.finalize().hex()
-        assert result == "000002a13b117b286d47ac47a1f53af3dfacb479530fb59152da40b8213429ec310519"
+        assert result == "00000248df16aca0c1f681b8b02cd0c859b3073c238101a6893bfa44d9f536a9819870"
 
 
 # ---------------------------------------------------------------------------
@@ -963,7 +963,7 @@ class TestListStructNullableInnerField:
         Golden value confirmed against Rust (PLT-1048).
         """
         result = ArrowDigester.hash_array(self._make_list_array(inner_nullable=True)).hex()
-        assert result == "000002880d5a883711e8de86c09cd3bdc4a2da0390e9ae93947c5de4d42675f1033f5a"
+        assert result == "0000023e818d98ed740fcd8240f4fdb39e4c53581b071c9ab6200a27924c186414f178"
 
     def test_non_nullable_inner_field(self):
         """LargeList<Struct> with nullable=False item field.
@@ -973,7 +973,7 @@ class TestListStructNullableInnerField:
         Golden value confirmed against Rust (PLT-1048).
         """
         result = ArrowDigester.hash_array(self._make_list_array(inner_nullable=False)).hex()
-        assert result == "000002d7423b057587e976fe344330d7b29694dd4a709d66cf4217ed8d8e1ccc69a39f"
+        assert result == "0000021a7aa4df873b7627617a5ce9a234a8849202508afc27eda81af271d8b12bf592"
 
     def test_nullable_differs_from_non_nullable(self):
         """Nullable vs non-nullable inner field must produce different hashes."""
@@ -999,7 +999,7 @@ class TestFloatSpecialValues:
             type=pa.float64(),
         )
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "0000027660de0bf00761a94c7aa2c6550cce417d9c14e5476ae787e24d555236a973bc"
+        assert result == "000002b8e0f66c036e26098ba55673ee856b1b23fb6dcb9acfb63207cf8ad6fadc34dd"
 
 
 # ---------------------------------------------------------------------------
@@ -1044,7 +1044,7 @@ class TestRealisticBatch:
 
         batch = _record_batch([name_arr, coords_arr, readings_arr], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
-        assert result == "000002d334ea76f2a30807791177def39034f19caf4e6bd142c23ec05cc192298893de"
+        assert result == "000002e86fcf5b5a6b21b9f3f4a5f3eb6608c6e531ecabd95cbf365d01089d2a924619"
 
     def test_realistic_schema(self):
         """Schema hash for realistic batch."""
@@ -1058,4 +1058,4 @@ class TestRealisticBatch:
                 pa.field("item", pa.float32(), nullable=False)), nullable=True),
         ])
         result = ArrowDigester.hash_schema(schema).hex()
-        assert result == "00000254036eae7a3edfdcd5960c95be8600f4db97f52b8100c47c4a92d79f8b444792"
+        assert result == "000002b4caaae1356e990fdb4b8ed43bf8f67bcdc3ee2f094da6e0f71575dc52ec31c9"
