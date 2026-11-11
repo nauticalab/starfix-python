@@ -23,7 +23,7 @@ from starfix.arrow_digester import ArrowDigester
 _LEAVES = [
     pa.int8(), pa.int16(), pa.int32(), pa.int64(), pa.uint8(), pa.uint64(),
     pa.float32(), pa.float64(), pa.date32(), pa.timestamp("us"), pa.decimal128(10, 2),
-    pa.binary(4), pa.utf8(), pa.large_utf8(), pa.binary(), pa.bool_(), "dict",
+    pa.binary(4), pa.utf8(), pa.large_utf8(), pa.binary(), pa.bool_(), "dict", "dict_int",
 ]
 
 
@@ -31,7 +31,11 @@ def _random_type(rng: random.Random, depth: int) -> pa.DataType:
     kind = rng.random()
     if depth >= 3 or kind < 0.45:
         leaf = rng.choice(_LEAVES)
-        return pa.dictionary(pa.int32(), pa.utf8()) if leaf == "dict" else leaf
+        if leaf == "dict":
+            return pa.dictionary(pa.int32(), pa.utf8())
+        if leaf == "dict_int":
+            return pa.dictionary(pa.int32(), pa.int64())
+        return leaf
     if kind < 0.75:
         element = pa.field("item", _random_type(rng, depth + 1), nullable=rng.random() < 0.6)
         return pa.large_list(element) if rng.random() < 0.3 else pa.list_(element)
@@ -57,7 +61,7 @@ def _leaf_values(t: pa.DataType, n: int, nullable: bool, rng: random.Random) -> 
         if pa.types.is_string(t) or pa.types.is_large_string(t):
             return "".join(rng.choice("xyzé") for _ in range(rng.randint(0, 5)))
         if pa.types.is_dictionary(t):
-            return rng.choice(["p", "q", "r"])
+            return rng.choice(["p", "q", "r"] if pa.types.is_string(t.value_type) else [7, 8, 9])
         if pa.types.is_timestamp(t) or pa.types.is_date(t):
             return rng.randint(0, 20000)
         if pa.types.is_unsigned_integer(t):
@@ -66,7 +70,7 @@ def _leaf_values(t: pa.DataType, n: int, nullable: bool, rng: random.Random) -> 
 
     values = [None if nullable and rng.random() < 0.25 else value(i) for i in range(n)]
     if pa.types.is_dictionary(t):
-        return pa.array(values, pa.utf8()).dictionary_encode()
+        return pa.array(values, t.value_type).dictionary_encode()
     if pa.types.is_timestamp(t) or pa.types.is_date(t):
         return pa.array(values, pa.int64() if pa.types.is_timestamp(t) else pa.int32()).cast(t)
     return pa.array(values, t)
@@ -191,3 +195,14 @@ def test_bitvec_bulk_append_matches_push(seed: int) -> None:
             bulk.extend(bits)
     assert len(one) == len(bulk)
     assert one.raw_bytes() == bulk.raw_bytes()
+
+
+@pytest.mark.parametrize("values", [[10, 20, None, 30, 10], ["p", None, "qq", "p", "r"]], ids=["int64", "utf8"])
+def test_dictionary_inside_list_matches_reference(values) -> None:
+    """Dictionaries nested in lists reach leaf hashing undecoded (declared type = value type)."""
+    child = pa.array(values).dictionary_encode()
+    lst = pa.ListArray.from_arrays(pa.array([0, 2, 2, 5], pa.int32()), child, mask=pa.array([False, True, False]))
+    for arr in (lst, lst.slice(1, 2)):
+        assert ArrowDigester.hash_array(arr) == ReferenceDigester.hash_array(arr)
+        batch = pa.record_batch([arr], names=["c"])
+        assert ArrowDigester.hash_record_batch(batch) == ReferenceDigester.hash_record_batch(batch)

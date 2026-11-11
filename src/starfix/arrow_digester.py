@@ -539,13 +539,13 @@ def _traverse_list(array, value_field, nullable, path, ancestor_nulls, fields):
     own_valid = _get_validity_list(array)
     effective_nulls = _combine_null_masks(own_valid, ancestor_nulls)
 
-    if not _contains_boolean(value_field.type):
+    # The physical child type: the canonical `value_field` has dictionaries replaced.
+    if not _row_boundaries_hashed(array.type.value_type):
         _traverse_list_vectorised(array, value_field, list_path, effective_nulls, fields)
         return
 
-    # Per-row path, kept only where a Boolean leaf lies below the list: the Boolean
-    # layout (spec Section 3.2) bit-packs each update separately, so the row
-    # boundaries are part of the hash there.
+    # Per-row path, kept only where row boundaries are part of the hash (see
+    # _row_boundaries_hashed).
     offsets = array.offsets
     for i in range(len(array)):
         is_valid = effective_nulls is None or effective_nulls[i]
@@ -571,19 +571,31 @@ def _traverse_list(array, value_field, nullable, path, ancestor_nulls, fields):
             )
 
 
-def _contains_boolean(data_type) -> bool:
-    """Whether a Boolean leaf occurs anywhere in `data_type` (dictionaries looked through)."""
+def _row_boundaries_hashed(data_type) -> bool:
+    """Whether hashing list elements row by row differs from hashing them all at once.
+
+    True when `data_type` contains, at any depth:
+    - a Boolean leaf: the Boolean layout (spec Section 3.2) bit-packs each update
+      separately, so each row's padding is hashed;
+    - a dictionary of fixed-width values: inside a list such an array reaches the
+      fixed-width leaf path undecoded and its index buffer is hashed per row (a known
+      defect of the released layout, reproduced byte for byte here).
+    """
     import pyarrow as pa
 
     t = data_type
-    while pa.types.is_dictionary(t):
-        t = t.value_type
+    if pa.types.is_dictionary(t):
+        v = t.value_type
+        if not (pa.types.is_string(v) or pa.types.is_large_string(v)
+                or pa.types.is_binary(v) or pa.types.is_large_binary(v)):
+            return True
+        t = v
     if pa.types.is_boolean(t):
         return True
     if pa.types.is_struct(t):
-        return any(_contains_boolean(t.field(i).type) for i in range(t.num_fields))
+        return any(_row_boundaries_hashed(t.field(i).type) for i in range(t.num_fields))
     if pa.types.is_list(t) or pa.types.is_large_list(t) or pa.types.is_fixed_size_list(t):
-        return _contains_boolean(t.value_type)
+        return _row_boundaries_hashed(t.value_type)
     return False
 
 
