@@ -757,7 +757,10 @@ def test_nullable_leaves_hashed_in_bounded_chunks(budget, monkeypatch) -> None:
 
 
 def test_zero_width_fixed_size_binary() -> None:
-    """FixedSizeBinary(0) values contribute no bytes; nulls are still recorded."""
+    """FixedSizeBinary(0) values contribute no bytes; nulls are still recorded.
+
+    Cross-language values: golden vectors fsb0_* (tests/test_golden_parity_format2.py).
+    """
     arr = pa.array([b"", None, b""], type=pa.binary(0))
     expected = V + sha(ha(), b'{"FixedSizeBinary":0}', u64(3), u64(3) + b"\x05", sha(b""))
     assert f2.hash_array(arr) == expected
@@ -770,7 +773,10 @@ def test_zero_width_fixed_size_binary() -> None:
 
 
 def test_dictionary_of_list_equals_plain_list() -> None:
-    """A dictionary whose values are a List (32-bit offsets) hashes as the plain list."""
+    """A dictionary whose values are a List (32-bit offsets) hashes as the plain list.
+
+    Cross-language values: golden vectors dict_of_list_* == plain_list_*.
+    """
     lt = pa.list_(pa.int32())
     dict_arr = pa.DictionaryArray.from_arrays(pa.array([0, 1, 0, 2, None], pa.int8()), pa.array([[1, 2], [3], None], lt))
     plain = pa.array([[1, 2], [3], [1, 2], None, None], lt)
@@ -786,7 +792,10 @@ def test_dictionary_of_list_equals_plain_list() -> None:
 
 
 def test_list_non_nullable_items_with_hidden_child_nulls() -> None:
-    """Child nulls under a null list slot or outside the offsets are not elements (accepted)."""
+    """Child nulls under a null list slot or outside the offsets are not elements (accepted).
+
+    Cross-language values: golden vectors hidden_null_{list,large_list}_rb_f0 == clean_*.
+    """
     t = pa.list_(pa.field("item", pa.int32(), nullable=False))
     schema = pa.schema([pa.field("l", t)])
     child = pa.array([1, None, 2, None], pa.int32())
