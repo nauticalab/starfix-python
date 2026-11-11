@@ -107,3 +107,26 @@ def test_dictionary_leaves_are_not_decoded_as_a_whole() -> None:
     finally:
         pa.set_memory_pool(default)
     assert pool.max_memory() < decoded_size // 20, f"Arrow peak {pool.max_memory()} bytes (decoded: {decoded_size})"
+
+
+def test_dictionary_validity_does_not_scan_the_dictionary_per_batch(monkeypatch) -> None:
+    """With a null-free dictionary, validity comes from the indices alone (no O(D) per batch)."""
+    calls = 0
+    original = f2.pc.take
+
+    def counting_take(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(f2.pc, "take", counting_take)
+    dictionary = pa.array([f"v{i}" for i in range(10_000)])
+    batches = [
+        pa.record_batch([pa.DictionaryArray.from_arrays(pa.array([i, None], pa.int32()), dictionary)], names=["d"])
+        for i in range(50)
+    ]
+    d = f2.Digester(batches[0].schema)
+    for b in batches:
+        d.update(b)
+    d.finalize()
+    assert calls == 0, f"{calls} take() calls over the dictionary validity"

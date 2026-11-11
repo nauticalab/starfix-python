@@ -467,6 +467,10 @@ def _logical_validity(arr: pa.Array) -> pa.Array | None:
     """Per-element validity (None: all valid). A dictionary element is valid iff its index
     is valid and the dictionary value it points to is valid."""
     if pa.types.is_dictionary(arr.type):
+        if arr.dictionary.null_count == 0:
+            # No null values: validity is the indices' (no work proportional to the
+            # dictionary, so many small batches over a large dictionary stay linear).
+            return arr.indices.is_valid() if arr.indices.null_count else None
         valid = pc.fill_null(pc.take(arr.dictionary.is_valid(), arr.indices), False)
         return None if pc.all(valid).as_py() is not False else valid
     return arr.is_valid() if arr.null_count else None
