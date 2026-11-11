@@ -107,3 +107,24 @@ jobs:
             echo "Copy the updated fixture from the starfix repo and commit it."
             exit 1
           fi
+
+      - name: Fetch authoritative ordered fixture from starfix
+        run: |
+          gh api repos/nauticalab/starfix/contents/tests/golden/ordered_v0.5.json \
+            --jq '.content' | base64 -d > /tmp/upstream_ordered.json
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Fail on ordered fixture drift
+        run: |
+          if [ ! -s /tmp/upstream_ordered.json ]; then
+            echo "ERROR: Could not fetch fixture from nauticalab/starfix main."
+            echo "Ensure nauticalab/starfix#main has tests/golden/ordered_v0.5.json"
+            echo "(the starfix ITL-898 PR must be merged before this check can pass)"
+            exit 1
+          fi
+          if ! diff tests/golden/ordered_v0.5.json /tmp/upstream_ordered.json; then
+            echo "ERROR: tests/golden/ordered_v0.5.json has drifted from nauticalab/starfix main."
+            echo "Copy the updated fixture from the starfix repo and commit it."
+            exit 1
+          fi
