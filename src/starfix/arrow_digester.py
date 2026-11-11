@@ -881,12 +881,28 @@ def _hash_boolean_data(arr, data_digest, effective_nulls) -> None:
     data_digest.update(bv.raw_bytes())
 
 
+# Elements per chunk when expanding Booleans to one byte each (bounds temporary memory).
+_BOOLEAN_CHUNK = 1 << 16
+
+
 def _hash_boolean_bytes(arr, data_digest, effective_nulls) -> None:
-    """Hash boolean data as one byte (0x00/0x01) per valid value (spec Section 9.5.1)."""
-    values = arr.to_pylist() if effective_nulls is None else [
-        arr[i].as_py() for i in range(len(arr)) if effective_nulls[i]
-    ]
-    data_digest.update(bytes(1 if v else 0 for v in values))
+    """Hash boolean data as one byte (0x00/0x01) per valid value (spec Section 9.5.1).
+
+    Works in chunks of ``_BOOLEAN_CHUNK`` elements: consecutive digest updates give
+    the same bytes as one update, without expanding the whole column at once.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    for start in range(0, len(arr), _BOOLEAN_CHUNK):
+        chunk = arr.slice(start, _BOOLEAN_CHUNK)
+        if effective_nulls is not None:
+            mask = pa.array(effective_nulls[start:start + len(chunk)], pa.bool_())
+            chunk = pc.filter(chunk, mask)
+        as_u8 = pc.cast(chunk, pa.uint8())
+        data_digest.update(
+            as_u8.buffers()[1].to_pybytes()[as_u8.offset:as_u8.offset + len(as_u8)]
+        )
 
 
 def _hash_binary_data(arr, data_digest, effective_nulls) -> None:

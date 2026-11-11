@@ -507,6 +507,24 @@ class TestNestedValidity:
             pa.array(cols["b"].slice(3, 5).to_pylist()), **opts(flags)
         )
 
+    @pytest.mark.parametrize("chunk", [1, 3, 8, 1 << 16])
+    def test_boolean_bytes_hashed_in_bounded_chunks(self, chunk, monkeypatch):
+        """Chunked hashing gives the spec 9.5.1 bytes across chunk boundaries, nulls and offsets."""
+        import starfix.arrow_digester as ad
+
+        monkeypatch.setattr(ad, "_BOOLEAN_CHUNK", chunk)
+        values = [True, None, False, True, True, None, False, False, True, True, None]
+        arr = pa.array(values).slice(1, 9)  # non-zero offset
+        valid = [v for v in values[1:10] if v is not None]
+        bits = sum(1 << i for i, v in enumerate(values[1:10]) if v is not None)
+        expected = V + sha(
+            tag(0x04), b'"Boolean"', u64(9) + bits.to_bytes(2, "little"), sha(bytes(int(v) for v in valid))
+        )
+        assert ArrowDigester.hash_array(arr, nested_validity=True) == expected
+        no_nulls = pa.array([True, False, True, True, False, True, False]).slice(2, 5)
+        expected = V + sha(tag(0x04), b'"Boolean"', sha(bytes([1, 1, 0, 1, 0])))
+        assert ArrowDigester.hash_array(no_nulls, nested_validity=True) == expected
+
     def test_hash_array_nullable_struct_root_entry(self):
         """A nullable struct array passed to hash_array gets a validity-only entry at ""."""
         arr = pa.StructArray.from_arrays(
