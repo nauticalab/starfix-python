@@ -24,6 +24,11 @@ _HEADER_PREFIX = b"\x00starfix" + VERSION_BYTES
 ORDERED_COLUMNS = 0x01
 ORDERED_STRUCT_FIELDS = 0x02
 
+# Section 1: entry-point kind, one ASCII byte of the header.
+KIND_SCHEMA = b"S"  # schema digest (hash_schema, and the schema digest inside record hashes)
+KIND_RECORDS = b"R"  # record batch / stream / table final digest
+KIND_ARRAY = b"A"  # hash_array
+
 _SCHEMA_MISMATCH = "Record batch schema does not match ArrowDigester schema"
 _U64 = struct.Struct("<Q")
 _CHUNK = 1 << 16  # Booleans per chunk when expanding them to one byte each
@@ -34,9 +39,9 @@ def flags_of(ordered_columns: bool, ordered_struct_fields: bool) -> int:
     return (ORDERED_COLUMNS if ordered_columns else 0) | (ORDERED_STRUCT_FIELDS if ordered_struct_fields else 0)
 
 
-def header(flags: int) -> bytes:
-    """Section 1: 0x00 || "starfix" || version || flags (12 bytes)."""
-    return _HEADER_PREFIX + bytes([flags])
+def header(kind: bytes, flags: int) -> bytes:
+    """Section 1: 0x00 || "starfix" || version || kind || flags (13 bytes)."""
+    return _HEADER_PREFIX + kind + bytes([flags])
 
 
 def _json(value: Any) -> str:
@@ -305,7 +310,7 @@ def schema_digest(schema: pa.Schema, include_metadata: bool, flags: int) -> byte
     """Section 2.5."""
     schema_nodes(schema)  # Section 7 rejections
     phase1, phase2 = schema_key(schema, include_metadata, flags)
-    h = hashlib.sha256(header(flags))
+    h = hashlib.sha256(header(KIND_SCHEMA, flags))
     h.update(phase1.encode())
     if phase2 is not None:
         h.update(phase2.encode())
@@ -626,7 +631,8 @@ class Digester:
         self._rows += batch.num_rows
 
     def finalize(self) -> bytes:
-        final = hashlib.sha256(self._schema_digest)
+        final = hashlib.sha256(header(KIND_RECORDS, self._flags))
+        final.update(self._schema_digest)
         final.update(_U64.pack(self._rows))
         _feed_entries(self._entries, final)
         return VERSION_BYTES + final.digest()
@@ -651,18 +657,18 @@ def hash_table(table: pa.Table, **options: bool) -> bytes:
 
 
 def hash_array(array: pa.Array, *, ordered_columns: bool = False, ordered_struct_fields: bool = False) -> bytes:
-    """Section 4: the array is the node at path "" (nullable iff it has a null).
+    """Section 4: the array is the node at path "", always nullable.
 
-    Nulls are counted on the resolved values: a valid dictionary key that points at a
-    null dictionary value is a null (pyarrow's DictionaryArray.null_count counts keys).
+    Its validity is always written: the logical validity after decoding dictionaries (a
+    valid dictionary key that points at a null dictionary value is a null).
     """
     flags = flags_of(ordered_columns, ordered_struct_fields)
-    root = pa.field("", array.type, nullable=_resolve(array).null_count > 0)
+    root = pa.field("", array.type, nullable=True)
     nodes = _walk([("", root)])
     _check_data_supported(nodes)
     entries = _new_entries(nodes)
     _visit(root, array, "", None, entries)
-    final = hashlib.sha256(header(flags))
+    final = hashlib.sha256(header(KIND_ARRAY, flags))
     final.update(type_json(array.type, flags).encode())
     final.update(_U64.pack(len(array)))
     _feed_entries(entries, final)
