@@ -64,8 +64,15 @@ def _hash(vector: dict[str, Any]) -> str:
     return result.hex()
 
 
+# Counts of the final golden file; the file is append-only, so they can only grow.
+_MIN_VECTORS = 323
+_MIN_RELATIONS = 89
+
+
 def test_fixture_is_well_formed() -> None:
     fixture = _fixture()
+    assert len(_vectors()) >= _MIN_VECTORS, f"only {len(_vectors())} vectors"
+    assert len(_relations()) >= _MIN_RELATIONS, f"only {len(_relations())} relations"
     assert fixture["format"] == 2
     ids = [v["id"] for v in _vectors()]
     assert ids and len(ids) == len(set(ids)), "vector ids must be unique"

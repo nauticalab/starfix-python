@@ -1,9 +1,11 @@
 """Hash format 2 (ITL-898), checked byte for byte against the specification.
 
-Spec: ``nauticalab/starfix docs/byte-layout-spec.md`` (format 2, commit 041b8f1). Every
-expected value is built here from the literal SHA-256 inputs in the spec, or is a final
-hash the spec prints; never from the implementation under test. Cross-language values are
-pinned separately by the Rust golden file once it lands.
+Spec: ``nauticalab/starfix docs/byte-layout-spec.md`` (format 2). Expected values are
+independent of the implementation under test: SHA-256 inputs written out from the spec's
+rules and worked examples (headers, hand-written canonical JSON, entry bytes), or hashes the
+spec prints. The exceptions are property tests, which compare two hashes of the
+implementation (e.g. equivalent inputs hash equal, different inputs differ). Cross-language
+values are pinned by the Rust golden file in tests/test_golden_parity_format2.py.
 """
 
 from __future__ import annotations
@@ -34,6 +36,11 @@ def hr(flags: int = 0) -> bytes:  # record batch / stream final digest header
 
 def ha(flags: int = 0) -> bytes:  # hash_array header
     return header(flags, b"A")
+
+
+def sd(json_: bytes, flags: int = 0) -> bytes:
+    """Schema digest from a hand-written Phase 1 JSON (Section 2.5, no metadata)."""
+    return sha(hs(flags), json_)
 
 
 def all_valid(n: int) -> bytes:
@@ -158,7 +165,7 @@ def test_example_2_list() -> None:
     batch = pa.record_batch([pa.array([[1, None], None, []], t)], schema=schema)
     final = sha(
         hr(),
-        f2.hash_schema(schema)[3:],
+        sd(b'{"c":{"data_type":{"LargeList":{"data_type":"Int32","nullable":true}},"nullable":true}}'),
         u64(3),
         u64(3) + b"\x05",
         sha(u64(2) + u64(0)),
@@ -178,7 +185,7 @@ def test_example_3_nullable_struct() -> None:
     batch = pa.record_batch([s], schema=schema)
     final = sha(
         hr(),
-        f2.hash_schema(schema)[3:],
+        sd(b'{"s":{"data_type":{"Struct":[{"data_type":"Int32","name":"a","nullable":true}]},"nullable":true}}'),
         u64(3),
         u64(3) + b"\x06",
         u64(3) + b"\x04",
@@ -194,7 +201,10 @@ def test_example_4_list_of_nullable_struct() -> None:
     batch = pa.record_batch([pa.array([[None, {"a": 4}]], t)], schema=schema)
     final = sha(
         hr(),
-        f2.hash_schema(schema)[3:],
+        sd(
+            b'{"l":{"data_type":{"LargeList":{"data_type":{"Struct":[{"data_type":"Int32","name":"a",'
+            b'"nullable":true}]},"nullable":true}},"nullable":false}}'
+        ),
         u64(1),
         sha(u64(2)),  # "l": lengths
         u64(2) + b"\x02",  # "l/": validity [0,1]
@@ -215,7 +225,11 @@ def test_example_4_as_printed_with_non_nullable_child() -> None:
         pa.StructArray.from_arrays([pa.array([0, 4], pa.int32())], fields=list(st), mask=pa.array([True, False])),
     ).cast(t)
     batch = pa.record_batch([arr], schema=schema)
-    final = sha(hr(), f2.hash_schema(schema)[3:], u64(1), sha(u64(2)), u64(2) + b"\x02", sha(i32(4)))
+    schema_digest = sd(
+        b'{"l":{"data_type":{"LargeList":{"data_type":{"Struct":[{"data_type":"Int32","name":"a",'
+        b'"nullable":false}]},"nullable":true}},"nullable":false}}'
+    )
+    final = sha(hr(), schema_digest, u64(1), sha(u64(2)), u64(2) + b"\x02", sha(i32(4)))
     assert f2.hash_record_batch(batch) == V + final
 
 
@@ -266,7 +280,12 @@ def test_phase2_paths_and_schema_metadata() -> None:
     expected_phase2 = (
         b'{"fields":{"d/x":{"k":"1"},"l/":{"e":"2"},"s":{"c":"3"},"s/x":{"k":"1"}},"schema":{"a":"0","z":"9"}}'
     )
-    phase1 = f2.phase1_json(schema, 0).encode()
+    x_struct = b'{"Struct":[{"data_type":"Int8","name":"x","nullable":true}]}'
+    phase1 = (
+        b'{"d":{"data_type":' + x_struct + b',"nullable":true},'
+        b'"l":{"data_type":{"LargeList":{"data_type":"Int8","nullable":true}},"nullable":true},'
+        b'"s":{"data_type":' + x_struct + b',"nullable":true}}'
+    )
     assert f2.hash_schema(schema, include_metadata=True) == V + sha(hs(), phase1, expected_phase2)
 
 
@@ -293,7 +312,7 @@ def test_names_and_physical_variants_not_hashed(left, right) -> None:
 
 
 def test_non_nullable_child_of_null_struct_contributes_nothing() -> None:
-    """Spec 3.2: elements whose (AND-ed) bit is 0 contribute no values (pending E2)."""
+    """Spec 3.2: elements whose effective validity is 0 contribute no values (also non-nullable)."""
     s = pa.StructArray.from_arrays(
         [pa.array([1, 2, 3], pa.int32())],
         fields=[pa.field("a", pa.int32(), nullable=False)],
@@ -301,7 +320,8 @@ def test_non_nullable_child_of_null_struct_contributes_nothing() -> None:
     )
     schema = pa.schema([pa.field("s", s.type, nullable=True)])
     batch = pa.record_batch([s], schema=schema)
-    final = sha(hr(), f2.hash_schema(schema)[3:], u64(3), u64(3) + b"\x05", sha(i32(1, 3)))
+    schema_digest = sd(b'{"s":{"data_type":{"Struct":[{"data_type":"Int32","name":"a","nullable":false}]},"nullable":true}}')
+    final = sha(hr(), schema_digest, u64(3), u64(3) + b"\x05", sha(i32(1, 3)))
     assert f2.hash_record_batch(batch) == V + final
 
 
@@ -315,24 +335,23 @@ def test_row_count_distinguishes_empty_structs() -> None:
 def test_entry_order_is_bytewise_node_path_order() -> None:
     schema = pa.schema([pa.field("b", pa.int8(), nullable=False), pa.field("a", pa.int8(), nullable=False)])
     batch = pa.record_batch([pa.array([1], pa.int8()), pa.array([2], pa.int8())], schema=schema)
-    final = sha(hr(), f2.hash_schema(schema)[3:], u64(1), sha(b"\x02"), sha(b"\x01"))
+    schema_digest = sd(b'{"a":{"data_type":"Int8","nullable":false},"b":{"data_type":"Int8","nullable":false}}')
+    final = sha(hr(), schema_digest, u64(1), sha(b"\x02"), sha(b"\x01"))
     assert f2.hash_record_batch(batch) == V + final
 
 
 def test_leaf_value_bytes() -> None:
     cases = [
-        (pa.array([1.5], pa.float64()), struct.pack("<d", 1.5)),
-        (pa.array([-1], pa.int16()), struct.pack("<h", -1)),
-        (pa.array([b"ab"], pa.binary()), u64(2) + b"ab"),
-        (pa.array(["é"], pa.utf8()), u64(2) + "é".encode()),
-        (pa.array([True, False], pa.bool_()), b"\x01\x00"),
-        (pa.array([b"\x01\x02"], pa.binary(2)), b"\x01\x02"),
-        (pa.array(["q", "p", "q"]).dictionary_encode(), u64(1) + b"q" + u64(1) + b"p" + u64(1) + b"q"),
-        (pa.array([10, 20, 10], pa.int64()).dictionary_encode(), struct.pack("<qqq", 10, 20, 10)),
+        (pa.array([1.5], pa.float64()), b'"Float64"', struct.pack("<d", 1.5)),
+        (pa.array([-1], pa.int16()), b'"Int16"', struct.pack("<h", -1)),
+        (pa.array([b"ab"], pa.binary()), b'"LargeBinary"', u64(2) + b"ab"),
+        (pa.array(["é"], pa.utf8()), b'"LargeUtf8"', u64(2) + "é".encode()),
+        (pa.array([True, False], pa.bool_()), b'"Boolean"', b"\x01\x00"),
+        (pa.array([b"\x01\x02"], pa.binary(2)), b'{"FixedSizeBinary":2}', b"\x01\x02"),
+        (pa.array(["q", "p", "q"]).dictionary_encode(), b'"LargeUtf8"', u64(1) + b"q" + u64(1) + b"p" + u64(1) + b"q"),
+        (pa.array([10, 20, 10], pa.int64()).dictionary_encode(), b'"Int64"', struct.pack("<qqq", 10, 20, 10)),
     ]
-    for arr, value_bytes in cases:
-        t = arr.type.value_type if pa.types.is_dictionary(arr.type) else arr.type
-        type_json = f2.type_json(t, 0).encode()
+    for arr, type_json, value_bytes in cases:
         expected = V + sha(ha(), type_json, u64(len(arr)), all_valid(len(arr)), sha(value_bytes))
         assert f2.hash_array(arr) == expected, arr.type
 
@@ -504,7 +523,7 @@ def test_unsupported_data_rejected_whatever_the_row_count(t) -> None:
         f2.hash_array(pa.array([], t))
 
 
-# ── Section 2.3: extension types (E1 pending for pyarrow's C++ built-in types) ──
+# ── Section 2.3: extension types ──
 
 
 class _Point(pa.ExtensionType):
@@ -664,7 +683,8 @@ def test_child_null_masked_by_null_parent_is_accepted() -> None:
     st = pa.struct([pa.field("x", pa.int32(), nullable=False)])
     s = pa.StructArray.from_arrays([pa.array([1, None], pa.int32())], fields=list(st), mask=pa.array([False, True]))
     schema = pa.schema([pa.field("s", st, nullable=True)])
-    final = sha(hr(), f2.hash_schema(schema)[3:], u64(2), u64(2) + b"\x01", sha(i32(1)))
+    schema_digest = sd(b'{"s":{"data_type":{"Struct":[{"data_type":"Int32","name":"x","nullable":false}]},"nullable":true}}')
+    final = sha(hr(), schema_digest, u64(2), u64(2) + b"\x01", sha(i32(1)))
     assert f2.hash_record_batch(pa.record_batch([s], schema=schema)) == V + final
 
 
@@ -722,16 +742,17 @@ def test_nullable_leaves_hashed_in_bounded_chunks(budget, monkeypatch) -> None:
     bools = [True, None, False, True, None, False, True]
     fsb = [b"\x01\x02", None, b"\x03\x04", b"\x05\x06", None, b"\x07\x08", b"\x09\x0a"]
     cases = [
-        (pa.array(strs).slice(1), b"".join(u64(len(s.encode())) + s.encode() for s in strs[1:] if s is not None)),
-        (pa.array(ints, pa.int32()).slice(1), i32(*[v for v in ints[1:] if v is not None])),
-        (pa.array(bools).slice(1), bytes(int(v) for v in bools[1:] if v is not None)),
-        (pa.array(fsb, pa.binary(2)).slice(1), b"".join(v for v in fsb[1:] if v is not None)),
+        (pa.array(strs).slice(1), b'"LargeUtf8"',
+         b"".join(u64(len(s.encode())) + s.encode() for s in strs[1:] if s is not None)),
+        (pa.array(ints, pa.int32()).slice(1), b'"Int32"', i32(*[v for v in ints[1:] if v is not None])),
+        (pa.array(bools).slice(1), b'"Boolean"', bytes(int(v) for v in bools[1:] if v is not None)),
+        (pa.array(fsb, pa.binary(2)).slice(1), b'{"FixedSizeBinary":2}', b"".join(v for v in fsb[1:] if v is not None)),
     ]
-    for arr, value_bytes in cases:
+    for arr, type_json, value_bytes in cases:
         valid = [v is not None for v in arr.to_pylist()]
         bits = sum(1 << i for i, ok in enumerate(valid) if ok)
         validity = u64(len(arr)) + bits.to_bytes((len(arr) + 7) // 8, "little")
-        expected = V + sha(ha(), f2.type_json(arr.type, 0).encode(), u64(len(arr)), validity, sha(value_bytes))
+        expected = V + sha(ha(), type_json, u64(len(arr)), validity, sha(value_bytes))
         assert f2.hash_array(arr) == expected, (arr.type, budget)
 
 

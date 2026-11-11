@@ -26,11 +26,17 @@ class ArrowDigester:
     reordered. Arrow schema- and field-level metadata are hashed only with
     ``include_metadata=True``; a schema without metadata hashes the same either way.
 
-    Raises ``ValueError`` for schemas in which two nodes share a path (duplicate names,
-    or a name containing ``/`` that aliases another node), for ListView, Union and
-    RunEndEncoded types, and for a streamed batch whose schema differs from the
-    digester's. Raises ``NotImplementedError`` for data of types whose schema can be
-    hashed but whose data cannot (Null, FixedSizeList, Map, Interval, view types).
+    Raises ``ValueError`` (in every mode) for: schemas in which two nodes share a path
+    (duplicate names, or a name containing ``/`` that aliases another node); ListView,
+    LargeListView, Union and RunEndEncoded types; hashing data of a schema containing
+    Null, FixedSizeList, Map, Interval or view types (their schemas hash), whatever the
+    number of rows; a non-nullable field holding a null that no enclosing struct null
+    explains; duplicate metadata keys when ``include_metadata`` is on; and a streamed
+    batch whose schema differs from the digester's. Raises ``TypeError`` for a wrong
+    container type (for example a Table passed to ``hash_record_batch``).
+
+    A digester is not thread-safe: feed one digester from one thread at a time. A batch
+    rejected by ``update`` leaves the digester unchanged.
     """
 
     def __init__(
@@ -122,9 +128,10 @@ class ArrowDigester:
         ordered_columns: bool = False,
         ordered_struct_fields: bool = False,
     ) -> bytes:
-        """Hash a single array (no schema; ``include_metadata`` does not apply).
+        """Hash a single array or ChunkedArray (equal to its chunks combined).
 
-        ``ordered_columns`` changes only the header of an array's hash.
+        There is deliberately no ``include_metadata``: an array has no schema or field
+        metadata. ``ordered_columns`` changes only the header of an array's hash.
         """
         return _format2.hash_array(
             array, ordered_columns=ordered_columns, ordered_struct_fields=ordered_struct_fields

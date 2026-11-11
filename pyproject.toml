@@ -27,3 +27,7 @@ version-file = "src/starfix/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/starfix"]
+
+[tool.pytest.ini_options]
+# An empty parametrization (e.g. a golden file without relations) must fail, not skip.
+empty_parameter_set_mark = "fail_at_collect"
