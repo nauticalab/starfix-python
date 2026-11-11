@@ -47,7 +47,8 @@ _FIX_DEFAULT_MAP_JSON = _FORMAT_2
 _FIX_DEFAULT_TYPE_JSON_UTF8 = _FORMAT_2
 # Null / Interval / Utf8View / BinaryView schema forms (spec 2.1); format 1 raises.
 _FIX_DEFAULT_TYPE_FORMS = _FORMAT_2
-# Phase 2 metadata paths of map fields: entries m/, key m//key, value m//value (2.2.1).
+# Phase 2 metadata paths (2.2.1): map entries m/, key m//key, value m//value, and
+# dictionaries looked through.
 _FIX_DEFAULT_MAP_METADATA_PATHS = _FORMAT_2
 # Streaming: reject a batch whose schema differs from the digester's (spec 9.7).
 _FIX_DEFAULT_BATCH_CHECK = _FORMAT_2
@@ -423,22 +424,28 @@ def _collect_nested_field_metadata(
     if field.metadata:
         result[path] = _sort_metadata(field.metadata)
 
-    if pa.types.is_struct(field.type):
-        for i in range(field.type.num_fields):
-            child = field.type.field(i)
+    # Spec 2.2.1 paths (options on) are the 9.6 node paths: dictionaries are looked
+    # through and a map's element is its entries field. Format 1 does neither.
+    rust_paths = flags or _FIX_DEFAULT_MAP_METADATA_PATHS
+    t = field.type
+    while rust_paths and pa.types.is_dictionary(t):
+        t = t.value_type
+
+    if pa.types.is_struct(t):
+        for i in range(t.num_fields):
+            child = t.field(i)
             child_path = f"{path}{DELIMITER}{child.name}"
             result.update(_collect_nested_field_metadata(child, child_path, flags))
     elif (
-        pa.types.is_list(field.type)
-        or pa.types.is_large_list(field.type)
-        or pa.types.is_fixed_size_list(field.type)
+        pa.types.is_list(t)
+        or pa.types.is_large_list(t)
+        or pa.types.is_fixed_size_list(t)
     ):
         element_path = f"{path}{DELIMITER}"
-        result.update(_collect_nested_field_metadata(field.type.value_field, element_path, flags))
-    elif pa.types.is_map(field.type):
+        result.update(_collect_nested_field_metadata(t.value_field, element_path, flags))
+    elif pa.types.is_map(t):
         element_path = f"{path}{DELIMITER}"
-        rust_paths = flags or _FIX_DEFAULT_MAP_METADATA_PATHS
-        element = field.type.field(0) if rust_paths else field.type.item_field
+        element = t.field(0) if rust_paths else t.item_field
         result.update(_collect_nested_field_metadata(element, element_path, flags))
 
     return dict(sorted(result.items()))

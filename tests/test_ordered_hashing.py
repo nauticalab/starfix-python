@@ -316,6 +316,20 @@ class TestTypeFormsAndMetadataPathsWithOptions:
         with pytest.raises(NotImplementedError):
             ArrowDigester.hash_schema(pa.schema([pa.field("c", pa.null())]))
 
+    @pytest.mark.parametrize("flags", [f for f in ALL_FLAGS if f])
+    def test_metadata_paths_look_through_dictionaries(self, flags):
+        """Spec 2.2.1 paths are the 9.6 node paths, which look through dictionaries."""
+        st = pa.struct([pa.field("a", pa.int32(), metadata={"u": "kg"})])
+        schema = pa.schema([pa.field("d", pa.dictionary(pa.int32(), st), nullable=True)])
+        dt = b'{"Struct":[{"data_type":"Int32","name":"a","nullable":true}]}'
+        if flags & 0x01:
+            phase1 = b'[{"data_type":' + dt + b',"name":"d","nullable":true}]'
+        else:
+            phase1 = b'{"d":{"data_type":' + dt + b',"nullable":true}}'
+        phase2 = b'{"fields":{"d/a":{"u":"kg"}}}'
+        got = ArrowDigester.hash_schema(schema, include_metadata=True, **opts(flags))
+        assert got == V + sha(tag(flags), phase1, phase2)
+
     def test_map_key_and_value_metadata_paths(self):
         key = pa.field("key", pa.utf8(), nullable=False, metadata={"role": "id"})
         value = pa.field("value", pa.int32(), metadata={"unit": "kg"})

@@ -25,6 +25,7 @@ from typing import Any
 
 import pyarrow as pa
 import pytest
+from _pyarrow_compat import UNREADABLE_HERE as _UNREADABLE_HERE
 
 from starfix.arrow_digester import _OPTION_FLAGS, ArrowDigester
 
@@ -129,7 +130,7 @@ _PYARROW_UNREPRESENTABLE = {
     "meta_map_all_schema_f1_im1": "pyarrow drops map entries-field metadata on IPC read",
 }
 
-_XFAIL_VECTORS = {**_KNOWN_DEFAULT_MODE_DIVERGENCES, **_PYARROW_UNREPRESENTABLE}
+_XFAIL_VECTORS = {**_KNOWN_DEFAULT_MODE_DIVERGENCES, **_PYARROW_UNREPRESENTABLE, **_UNREADABLE_HERE}
 
 
 def _vector_params() -> list[Any]:
