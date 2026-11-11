@@ -108,24 +108,27 @@ jobs:
             exit 1
           fi
 
-      - name: Fetch authoritative ordered fixture from starfix
+      - name: Fetch authoritative format-2 fixtures from starfix
         run: |
-          # Tolerate a missing file here so the next step prints the explanation.
-          gh api repos/nauticalab/starfix/contents/tests/golden/ordered_v0.5.json \
-            --jq '.content' | base64 -d > /tmp/upstream_ordered.json || true
+          # Tolerate missing files here so the next step prints the explanation.
+          for f in format2_v0.5.json format1_to_format2.json; do
+            gh api "repos/nauticalab/starfix/contents/tests/golden/$f" \
+              --jq '.content' | base64 -d > "/tmp/upstream_$f" || true
+          done
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      - name: Fail on ordered fixture drift
+      - name: Fail on format-2 fixture drift
         run: |
-          if [ ! -s /tmp/upstream_ordered.json ]; then
-            echo "ERROR: Could not fetch fixture from nauticalab/starfix main."
-            echo "Ensure nauticalab/starfix#main has tests/golden/ordered_v0.5.json"
-            echo "(the starfix ITL-898 PR must be merged before this check can pass)"
-            exit 1
-          fi
-          if ! diff tests/golden/ordered_v0.5.json /tmp/upstream_ordered.json; then
-            echo "ERROR: tests/golden/ordered_v0.5.json has drifted from nauticalab/starfix main."
-            echo "Copy the updated fixture from the starfix repo and commit it."
-            exit 1
-          fi
+          for f in format2_v0.5.json format1_to_format2.json; do
+            if [ ! -s "/tmp/upstream_$f" ]; then
+              echo "ERROR: Could not fetch tests/golden/$f from nauticalab/starfix main."
+              echo "(the starfix ITL-898 PR must be merged before this check can pass)"
+              exit 1
+            fi
+            if ! diff "tests/golden/$f" "/tmp/upstream_$f" > /dev/null; then
+              echo "ERROR: tests/golden/$f has drifted from nauticalab/starfix main."
+              echo "Copy the updated fixture from the starfix repo and commit it."
+              exit 1
+            fi
+          done

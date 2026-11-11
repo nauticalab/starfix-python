@@ -52,13 +52,13 @@ class TestSpecExamples:
         """Example B: BooleanArray [true, NULL, false, true]."""
         array = pa.array([True, None, False, True], type=pa.bool_())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "00000185a9c99eba7bcfd9b14fd529b9534f2289319779270aa4a072f117cf90a6ac8b"
+        assert result == "0000024100d139820e2b287fee67fbd7624e103a6ab7674b5e0170e933a896cc9ee41d"
 
     def test_example_c_non_nullable_int32(self):
         """Example C: Int32Array [1, 2, 3] — non-nullable."""
         array = pa.array([1, 2, 3], type=pa.int32())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "00000109cb203c0cae27346ea2ce37d1245775ac99c8b26634677de56268ba01dc693c"
+        assert result == "0000024c470976f10386fad05c0ef8ac4d3f82c4fd656c3ea6255ef8a21180ce53597a"
 
     def test_example_d_non_nullable_binary(self):
         """Example D: BinaryArray [b'hi', b''] — non-nullable; tests Binary→LargeBinary canonicalization."""
@@ -100,13 +100,13 @@ class TestSpecExamples:
         """Example G: Int32Array [Some(42), None, Some(-7), Some(0)]."""
         array = pa.array([42, None, -7, 0], type=pa.int32())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "0000018330f9b8796b9434cbf7bc028c18c58a2a739b980acf9995ce1e5d60b43b0138"
+        assert result == "000002d1d8a0c525ec9d5b68cd7f3cc7c0ebf465c9159ae35a59010a18044e245e4f61"
 
     def test_example_h_nullable_string(self):
         """Example H: StringArray [Some('hello'), None, Some('world'), Some('')]."""
         array = pa.array(["hello", None, "world", ""], type=pa.utf8())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "0000016255bde0141ebf26e08c31c96f6112e5e21d101ab8bb90d77f2c3eec02c62d3c"
+        assert result == "000002445ec6b02f286788f52986673493d9d2c7d2efe4b4870fa780aeec77fbaa0385"
 
     def test_example_i_empty_table(self):
         """Example I: schema {a: Int32 non-null, b: Boolean nullable} with zero rows."""
@@ -127,7 +127,7 @@ class TestSpecExamples:
         digester.update(batch1)
         digester.update(batch2)
         result = digester.finalize().hex()
-        assert result == "000001d4efb209fd319c8b418662caad5922b154003d0425fa722060b44e6d5eb0d857"
+        assert result == "000002a87ff648c2385327185b77630ffff50ae4470f90542582a783aa6740dcccb68b"
 
     def test_example_k_struct_column(self):
         """Example K: {person: Struct<age: Int32 non-null, name: LargeUtf8 non-null>}."""
@@ -212,7 +212,7 @@ class TestPrimitiveTypes:
     def test_int32(self):
         array = pa.array([42, None, -7, 0], type=pa.int32())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "0000018330f9b8796b9434cbf7bc028c18c58a2a739b980acf9995ce1e5d60b43b0138"
+        assert result == "000002d1d8a0c525ec9d5b68cd7f3cc7c0ebf465c9159ae35a59010a18044e245e4f61"
 
     def test_int64(self):
         array = pa.array([1_000_000, None, -1_000_000, 0], type=pa.int64())
@@ -272,7 +272,7 @@ class TestTemporalTypes:
         """Time32(s): seconds since midnight."""
         array = pa.array([1000, None, 5000, 0], type=pa.time32("s"))
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "000001aba70469e596c735ec13c3d60a9db2d0e5515eb864f07ad5d24572b35f23eacc"
+        assert result == "0000025ea1da45fe10e3034a18052542883c0c234353fc229ba1ab9423292d557fabe5"
 
     def test_time32_milliseconds(self):
         """Time32(ms): milliseconds since midnight."""
@@ -284,7 +284,7 @@ class TestTemporalTypes:
         """Time64(us): microseconds since midnight."""
         array = pa.array([1_000_000, None, 5_000_000, 0], type=pa.time64("us"))
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "000001c96d705b1278f9ffe1b31fb307408768f14d961c44028a1d0f778dd61786ee26"
+        assert result == "0000025360527b27a5170c14a2f6e4493d940d29e27678d80899dd94655a4884a5589b"
 
     def test_time64_nanoseconds(self):
         """Time64(ns): nanoseconds since midnight."""
@@ -303,13 +303,13 @@ class TestVariableLengthTypes:
         """Binary array — tests LargeBinary canonicalization."""
         array = pa.array([b"hello", None, b"world", b""], type=pa.binary())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "0000018dc3a0e479d1335553546c8f23c36d75335cbd34805a6f96c5d5225b347fbc57"
+        assert result == "000002ce0c8cc68b264f3040513d6fb5a94e4ec6b4b53a2baaad3cc0fd4d5a1b5e3f3d"
 
     def test_large_binary_equals_binary(self):
         """LargeBinary and Binary arrays with same data must produce the same hash."""
         small = pa.array([b"hello", None, b"world", b""], type=pa.binary())
         large = pa.array([b"hello", None, b"world", b""], type=pa.large_binary())
-        expected = "0000018dc3a0e479d1335553546c8f23c36d75335cbd34805a6f96c5d5225b347fbc57"
+        expected = "000002ce0c8cc68b264f3040513d6fb5a94e4ec6b4b53a2baaad3cc0fd4d5a1b5e3f3d"
         assert ArrowDigester.hash_array(small).hex() == expected
         assert ArrowDigester.hash_array(large).hex() == expected
 
@@ -317,13 +317,13 @@ class TestVariableLengthTypes:
         """String (Utf8) array — tests LargeUtf8 canonicalization."""
         array = pa.array(["hello", None, "world", ""], type=pa.utf8())
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "0000016255bde0141ebf26e08c31c96f6112e5e21d101ab8bb90d77f2c3eec02c62d3c"
+        assert result == "000002445ec6b02f286788f52986673493d9d2c7d2efe4b4870fa780aeec77fbaa0385"
 
     def test_large_string_equals_string(self):
         """LargeUtf8 and Utf8 arrays with same data must produce the same hash."""
         small = pa.array(["hello", None, "world", ""], type=pa.utf8())
         large = pa.array(["hello", None, "world", ""], type=pa.large_utf8())
-        expected = "0000016255bde0141ebf26e08c31c96f6112e5e21d101ab8bb90d77f2c3eec02c62d3c"
+        expected = "000002445ec6b02f286788f52986673493d9d2c7d2efe4b4870fa780aeec77fbaa0385"
         assert ArrowDigester.hash_array(small).hex() == expected
         assert ArrowDigester.hash_array(large).hex() == expected
 
@@ -346,7 +346,7 @@ class TestDecimalTypes:
             type=pa.decimal128(9, 2),
         )
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "0000014f015bd5c4b6ce6e939a8c890333f3e110c2c28ef8014aafd352f8373791e547"
+        assert result == "000002e83147c84038cb72cb3cc8e24e651e0491028c449cfe7f2a9d51ded84391ca40"
 
     def test_decimal_precision_15_scale_3(self):
         """Decimal128 precision=15 (maps to decimal64 range) scale=3."""
@@ -355,7 +355,7 @@ class TestDecimalTypes:
             type=pa.decimal128(15, 3),
         )
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "000001dc08c7b9c583edecec36bc5dee21cd2edec9f402a651014fea5f8834d16ad737"
+        assert result == "00000226d3b5c66b1fa3b3de097542369f89b2717f3026c778ce17d57817fbf2fec8f0"
 
     def test_decimal_precision_38_scale_5(self):
         """Decimal128 precision=38 scale=5 — full 16-byte integer path."""
@@ -369,7 +369,7 @@ class TestDecimalTypes:
             type=pa.decimal128(38, 5),
         )
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "0000011e3b33d28771b3593fd5dc4b68af8091a1ba9cd493ade374e7368e213bef244e"
+        assert result == "0000026193b4a954e812702fc77e319e834483780ac424d0b54fa9bf7163c90a9ab163"
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +390,7 @@ class TestListTypes:
             type=pa.list_(pa.field("item", pa.int32(), nullable=True)),
         )
         result = ArrowDigester.hash_array(array).hex()
-        assert result == "000001dc359d563a1ed210eb271b314612ea8343f0a0b0955b9053a9eb47962d27163c"
+        assert result == "000002e3c042074d4a197ca8b2f7e5aeae99b9cc9010a53b6c63120086d4e9688fd533"
 
     def test_large_list_equals_list(self):
         """LargeList<Int32> with the same data must produce the same hash as List<Int32>."""
@@ -402,7 +402,7 @@ class TestListTypes:
             [[1, 2, 3], None, [4, 5], [6]],
             type=pa.large_list(pa.field("item", pa.int32(), nullable=True)),
         )
-        expected = "000001dc359d563a1ed210eb271b314612ea8343f0a0b0955b9053a9eb47962d27163c"
+        expected = "000002e3c042074d4a197ca8b2f7e5aeae99b9cc9010a53b6c63120086d4e9688fd533"
         assert ArrowDigester.hash_array(small).hex() == expected
         assert ArrowDigester.hash_array(large).hex() == expected
 
@@ -588,7 +588,7 @@ class TestStreamingHashing:
         digester.update(batch1)
         digester.update(batch2)
         result = digester.finalize().hex()
-        assert result == "0000019f5fa370d315a4b4f2314be7b7284a0549b70ad4e21e584fdebf441ad02f44f0"
+        assert result == "000002cfdbea6ff7282f0edaf4d7ca6015565dec2c8eb05073aeb6452ff83414cb8a43"
 
     def test_batch_split_independence(self):
         """Splitting a batch into two must not change the hash."""
@@ -626,37 +626,37 @@ class TestTimestampDurationHashing:
 
     def test_timestamp_second_utc(self):
         arr = pa.array([0, None, 1_000], type=pa.timestamp("s", tz="UTC"))
-        assert ArrowDigester.hash_array(arr).hex() == "0000017cef6166a14741f94906bd3146ffa197d1b5756d594eb46304b678b21e44c40b"
+        assert ArrowDigester.hash_array(arr).hex() == "00000252859a0dad006bac78dd1ba3fa17fde43bfa2af9cc95bdd08b6611da1691f012"
 
     def test_timestamp_millisecond_utc(self):
         arr = pa.array([0, None, 1_000], type=pa.timestamp("ms", tz="UTC"))
-        assert ArrowDigester.hash_array(arr).hex() == "000001fd253a835218d5605ce8bb348699f973b93e29fbe21fe6e532468f988ece4ce5"
+        assert ArrowDigester.hash_array(arr).hex() == "000002f6dcd4d91471e975d86257785c15f0d8e120a84b45f163378e913d10935f1ec9"
 
     def test_timestamp_microsecond_utc(self):
         arr = pa.array([0, None, 1_000], type=pa.timestamp("us", tz="UTC"))
-        assert ArrowDigester.hash_array(arr).hex() == "0000013af741ca0fe5bd48d0bd39e1993c60e7c032f23c4cf4be6c11cc4b50ce56013e"
+        assert ArrowDigester.hash_array(arr).hex() == "00000209c1c989349caa973563a880521cbcaaa4e62ccc77f380e69f0fc57c639b4bfa"
 
     def test_timestamp_nanosecond_utc(self):
         arr = pa.array([0, None, 1_000], type=pa.timestamp("ns", tz="UTC"))
-        assert ArrowDigester.hash_array(arr).hex() == "000001f5b86904b4b7f2c6a18c7c4febda142bf622e4d01752f42b8f832c0a68a4d9c0"
+        assert ArrowDigester.hash_array(arr).hex() == "0000021d86082dfda0e2f0449320c2acd853756d79dc3080cf1ee14327c7c9f2201480"
 
     # -- Timestamp (tz-naive) ----------------------------------------------
 
     def test_timestamp_second_naive(self):
         arr = pa.array([0, None, 1_000], type=pa.timestamp("s"))
-        assert ArrowDigester.hash_array(arr).hex() == "0000016ee5249d352c03cc820af39e98b7043993d467207cb6ca34c8d13cfacf141e30"
+        assert ArrowDigester.hash_array(arr).hex() == "0000028fa5d6fbc775327e0c766cab77a00991dc87cf7ac7d45f875d049559b55cbb3e"
 
     def test_timestamp_millisecond_naive(self):
         arr = pa.array([0, None, 1_000], type=pa.timestamp("ms"))
-        assert ArrowDigester.hash_array(arr).hex() == "000001ef46619d2be8259335ed0943f42ea3ced19ff6d75471a64b2f03aea89afa4842"
+        assert ArrowDigester.hash_array(arr).hex() == "000002c0d0e86c4e7ff759ad83bf887cf5b20f2b662ceeeba5865ed1f5353b6b7a9445"
 
     def test_timestamp_microsecond_naive(self):
         arr = pa.array([0, None, 1_000], type=pa.timestamp("us"))
-        assert ArrowDigester.hash_array(arr).hex() == "0000017e624eb2847f79f940d7123980b076aea1c1ecd3adaa34bdae24fa00f05afda3"
+        assert ArrowDigester.hash_array(arr).hex() == "000002148a265e62ae6878931d8d3316c4aec43f50da2e688d83bfe62901c3703e6b4f"
 
     def test_timestamp_nanosecond_naive(self):
         arr = pa.array([0, None, 1_000], type=pa.timestamp("ns"))
-        assert ArrowDigester.hash_array(arr).hex() == "000001f677ef0e42e9e40ea092471f82283212833ab6b4ff9bb45e86e88590f8d15796"
+        assert ArrowDigester.hash_array(arr).hex() == "00000292c1b50fa17e537e6afb5903cce37b5b28b03088e6ec3e23c346d9adafb071a7"
 
     # -- Timestamp: unit and tz produce different hashes -------------------
 
@@ -682,19 +682,19 @@ class TestTimestampDurationHashing:
 
     def test_duration_second(self):
         arr = pa.array([0, None, 1_000], type=pa.duration("s"))
-        assert ArrowDigester.hash_array(arr).hex() == "0000013540d23a4abf1dfbc939a9e5514be69e364cec466ef900fa35050dc3cf2994fa"
+        assert ArrowDigester.hash_array(arr).hex() == "000002f4db00404adc309eaa3c23518b36b56a44659edc0a4c4dbbddea90449cf90413"
 
     def test_duration_millisecond(self):
         arr = pa.array([0, None, 1_000], type=pa.duration("ms"))
-        assert ArrowDigester.hash_array(arr).hex() == "000001564a87e1e07898af07a4a212e3db83f911ac287134f28c772bf5fb4da683402c"
+        assert ArrowDigester.hash_array(arr).hex() == "000002767dcb630f550d41da343f63fb308d1e2ce97e68306f988573178da666fb156f"
 
     def test_duration_microsecond(self):
         arr = pa.array([0, None, 1_000], type=pa.duration("us"))
-        assert ArrowDigester.hash_array(arr).hex() == "0000017904faf3043cf870f0c139cba0282cdaf11c590aeb80f2a0d6b103893ba5da2a"
+        assert ArrowDigester.hash_array(arr).hex() == "00000267a46b80b8577b61b24e665edbe71f78d6af7170305cbe0b348ca07a1b2874d9"
 
     def test_duration_nanosecond(self):
         arr = pa.array([0, None, 1_000], type=pa.duration("ns"))
-        assert ArrowDigester.hash_array(arr).hex() == "00000189a38c5a7adf4b19b3e0d467f042ab2389fed8ae5f1d2af8555dd6131478a49b"
+        assert ArrowDigester.hash_array(arr).hex() == "00000265d49688aae1ade659148d969f4fd703fa688fd7e3dcbe3c00d5e7ef2ae50720"
 
     def test_duration_units_differ(self):
         values = [1_000, 2_000]
