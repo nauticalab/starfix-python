@@ -1,9 +1,6 @@
 # Changelog
 
-## Unreleased (proposed 0.5.0)
-
-The package version comes from the git tag at release (hatch-vcs); nothing in the source
-pins it to 0.5.0.
+## 0.5.0 (2026-11-11)
 
 ### Changed — hash format 2 (every hash changes)
 
@@ -73,5 +70,7 @@ buffers: at 1M rows, `list<int32>` takes about 20 ms instead of an estimated 90 
   pyarrow version only from 19 on.
 - In every mode, `ValueError` is raised for schemas with duplicate or `/`-aliased field paths;
   for `ListView`, `LargeListView`, `Union` and `RunEndEncoded` types; for hashing data of
-  `Null`, `Map`, `Interval` and view types (previously `NotImplementedError` or accepted); for a non-nullable field holding a null that no enclosing struct null explains;
-  and for a streamed batch whose schema differs from the digester's.
+  `Null`, `Map`, `Interval` and view types, also as the items of a `FixedSizeList`
+  (previously `NotImplementedError` or accepted); for a non-nullable field holding a null that
+  no enclosing struct null explains; and for a streamed batch whose schema differs from the
+  digester's.
