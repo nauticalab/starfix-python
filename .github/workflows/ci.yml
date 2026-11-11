@@ -110,10 +110,11 @@ jobs:
 
       - name: Fetch authoritative format-2 fixtures from starfix
         run: |
+          # Raw media type: no 1 MB limit (format2_v0.5.json is append-only and grows).
           # Tolerate missing files here so the next step prints the explanation.
           for f in format2_v0.5.json format1_to_format2.json; do
-            gh api "repos/nauticalab/starfix/contents/tests/golden/$f" \
-              --jq '.content' | base64 -d > "/tmp/upstream_$f" || true
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/nauticalab/starfix/contents/tests/golden/$f" > "/tmp/upstream_$f" || true
           done
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
