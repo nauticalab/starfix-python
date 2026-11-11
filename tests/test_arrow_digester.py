@@ -1,7 +1,10 @@
 """Tests for the pure-Python Arrow digester.
 
-Golden hash values are taken from the Rust test suite to ensure
-byte-for-byte compatibility.
+Hash format 2: every expected value is a Rust-produced format-2 value from
+tests/golden/format1_to_format2.json (ITL-898); the format-1 values these tests
+pinned originally map to them one to one.
+The Rust values are the authoritative source of truth; these tests fail
+immediately if the Python implementation diverges.
 """
 
 import pyarrow as pa

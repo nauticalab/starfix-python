@@ -127,7 +127,7 @@ class TestMetadataExcludedByDefault:
             schema=schema,
         )
         result = ArrowDigester.hash_record_batch(batch, include_metadata=False).hex()
-        assert result == "0000018020e47f4462f26b0bc73ad110ea0f9198c2745c04ce23335093d2b78ef51c88"
+        assert result == "00000292eeae0418072b559ac1b864e6a7e249749582ab32239ffc9443a00dcc18946f"
 
 
 class TestSchemaMetadataChangesHash:
