@@ -52,8 +52,27 @@ class _BitVec:
         self._len += 1
 
     def extend_true(self, count: int) -> None:
-        for _ in range(count):
-            self.push(True)
+        self._extend_int((1 << count) - 1, count)
+
+    def extend(self, bits: list[bool]) -> None:
+        """Append many bits at once (same result as push() for each)."""
+        import pyarrow as pa
+
+        n = len(bits)
+        if n:
+            packed = pa.array(bits, pa.bool_()).buffers()[1]  # LSB-first bitmap, offset 0
+            value = int.from_bytes(memoryview(packed)[: (n + 7) >> 3], "little")
+            self._extend_int(value & ((1 << n) - 1), n)
+
+    def _extend_int(self, value: int, n: int) -> None:
+        """Append the n low bits of `value`, bit 0 first."""
+        if n == 0:
+            return
+        shift = self._len & 7
+        if shift:
+            value = (value << shift) | self._bytes.pop()
+        self._bytes += value.to_bytes((n + shift + 7) >> 3, "little")
+        self._len += n
 
     def __len__(self) -> int:
         return self._len
@@ -470,7 +489,7 @@ def _get_validity_list(array):
     """Return a list of bools (True=valid) or None if no nulls."""
     if array.null_count == 0:
         return None
-    return [array[i].is_valid for i in range(len(array))]
+    return array.is_valid().to_pylist()
 
 
 def _traverse_and_update(data_type, nullable, array, path, ancestor_nulls, fields):
@@ -510,8 +529,7 @@ def _traverse_list(array, value_field, nullable, path, ancestor_nulls, fields):
                 own_valid = _get_validity_list(array)
                 effective = _combine_null_masks(own_valid, ancestor_nulls)
                 if effective is not None:
-                    for v in effective:
-                        null_bits.push(v)
+                    null_bits.extend(effective)
                 else:
                     null_bits.extend_true(len(array))
 
@@ -647,8 +665,7 @@ def _traverse_leaf(data_type, array, path, ancestor_nulls, fields):
     # Push effective validity to null_bits
     if null_bits is not None:
         if effective is not None:
-            for v in effective:
-                null_bits.push(v)
+            null_bits.extend(effective)
         else:
             null_bits.extend_true(len(array))
 

@@ -170,3 +170,24 @@ def test_generator_covers_the_required_shapes() -> None:
         "boolean_under_list", "struct", "null_struct",
     }
     assert required <= seen, f"missing shapes: {required - seen}"
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_bitvec_bulk_append_matches_push(seed: int) -> None:
+    from starfix.arrow_digester import _BitVec
+
+    rng = random.Random(seed)
+    one, bulk = _BitVec(), _BitVec()
+    for _ in range(rng.randint(1, 6)):
+        if rng.random() < 0.3:
+            count = rng.randint(0, 20)
+            for _ in range(count):
+                one.push(True)
+            bulk.extend_true(count)
+        else:
+            bits = [rng.random() < 0.5 for _ in range(rng.randint(0, 20))]
+            for b in bits:
+                one.push(b)
+            bulk.extend(bits)
+    assert len(one) == len(bulk)
+    assert one.raw_bytes() == bulk.raw_bytes()
