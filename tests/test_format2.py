@@ -511,9 +511,11 @@ def test_streaming_check() -> None:
 
 @pytest.mark.parametrize(
     "t",
-    [pa.null(), pa.list_(pa.int8(), 2), pa.map_(pa.utf8(), pa.int8()), pa.month_day_nano_interval(),
-     pa.struct([pa.field("n", pa.null())]), pa.list_(pa.null())],
-    ids=["null", "fixed_size_list", "map", "interval", "nested_null", "list_of_null"],
+    [pa.null(), pa.map_(pa.utf8(), pa.int8()), pa.month_day_nano_interval(),
+     pa.struct([pa.field("n", pa.null())]), pa.list_(pa.null()),
+     pa.list_(pa.null(), 2), pa.list_(pa.map_(pa.utf8(), pa.int8()), 2), pa.list_(pa.string_view(), 0)],
+    ids=["null", "map", "interval", "nested_null", "list_of_null",
+         "fixed_size_list_of_null", "fixed_size_list_of_map", "fixed_size_list_of_view"],
 )
 def test_unsupported_data_rejected_whatever_the_row_count(t) -> None:
     """Spec 7 item 3: rejected before any data is hashed, also with zero rows / no batches."""
@@ -1045,3 +1047,233 @@ def test_dictionary_of_struct_leaf_null_hidden_under_null_outer_struct(child_val
         assert f2.hash_record_batch(
             pa.record_batch([dict_arr], schema=pa.schema([pa.field("d", dict_arr.type)])), **options
         ) == f2.hash_record_batch(pa.record_batch([plain], schema=pa.schema([pa.field("d", outer_t)])), **options), options
+
+
+# ── FixedSizeList data (ITL-927) ────────────────────────────────────────
+#
+# Spec 3.2: a fixed-size-list node's entry is its (effective) validity if nullable and empty
+# otherwise (no lengths digest, no values). Its element node gets the n items of every
+# effectively valid slot; items under null or struct-masked slots and child positions beyond
+# len * n are not elements. Cross-language values: the fsl_* golden vectors.
+
+_FSL_I32 = b'{"FixedSizeList":[{"data_type":"Int32","nullable":true},2]}'
+
+
+def _fsl(child: pa.Array, n: int, valid: list[bool] | None, length: int, *, offset: int = 0,
+         item_nullable: bool = True) -> pa.Array:
+    """A FixedSizeList<Int32-like, n> array built from buffers: `length` slots at `offset`
+    over `child` (which may hold more positions than (offset + length) * n)."""
+    t = pa.list_(pa.field("item", child.type, nullable=item_nullable), n)
+    validity = None
+    if valid is not None:
+        bits = sum(1 << i for i, ok in enumerate(valid) if ok)
+        validity = pa.py_buffer(bits.to_bytes((len(valid) + 7) // 8 or 1, "little"))
+    return pa.Array.from_buffers(t, length, [validity], offset=offset, children=[child])
+
+
+def test_fixed_size_list_spec_example_3b_bytes() -> None:
+    """Spec Example 3b: rows [[1, null], null, [3, 4]], child [1, null, 7, 8, 3, 4]."""
+    arr = _fsl(pa.array([1, None, 7, 8, 3, 4], pa.int32()), 2, [True, False, True], 3)
+    assert arr.to_pylist() == [[1, None], None, [3, 4]]
+    batch = pa.record_batch([arr], schema=pa.schema([pa.field("f", arr.type, nullable=True)]))
+    final = sha(
+        hr(),
+        sd(b'{"f":{"data_type":' + _FSL_I32 + b',"nullable":true}}'),
+        u64(3),
+        u64(3) + b"\x05",  # entry "f": validity [1,0,1], no lengths
+        u64(4) + b"\x0d",  # entry "f/": validity [1,0,1,1] (items of slots 0 and 2 only)
+        sha(i32(1, 3, 4)),
+    )
+    assert f2.hash_record_batch(batch) == V + final
+    # The hash_array root is always nullable; its element node is "/".
+    assert f2.hash_array(arr) == V + sha(ha(), _FSL_I32, u64(3), u64(3) + b"\x05", u64(4) + b"\x0d", sha(i32(1, 3, 4)))
+
+
+def test_fixed_size_list_non_nullable_entry_is_empty() -> None:
+    """A non-nullable fixed-size list contributes no item at all; n is in the schema only."""
+    t = pa.list_(pa.field("item", pa.int32(), nullable=False), 2)
+    arr = pa.array([[1, 2], [3, 4]], t)
+    schema = pa.schema([pa.field("f", t, nullable=False)])
+    final = sha(
+        hr(),
+        sd(b'{"f":{"data_type":{"FixedSizeList":[{"data_type":"Int32","nullable":false},2]},"nullable":false}}'),
+        u64(2),
+        sha(i32(1, 2, 3, 4)),  # entry "f" is empty; entry "f/" is the values digest
+    )
+    assert f2.hash_record_batch(pa.record_batch([arr], schema=schema)) == V + final
+
+
+def test_fixed_size_list_size_zero_bytes() -> None:
+    """n = 0: the element subtree has no elements; row count and validity carry everything."""
+    arr = _fsl(pa.array([], pa.int32()), 0, [True, False, True], 3)
+    assert arr.to_pylist() == [[], None, []]
+    t_json = b'{"FixedSizeList":[{"data_type":"Int32","nullable":true},0]}'
+    empty_child = u64(0) + sha(b"")  # validity with bit_count 0, values digest of nothing
+    assert f2.hash_array(arr) == V + sha(ha(), t_json, u64(3), u64(3) + b"\x05", empty_child)
+    schema = pa.schema([pa.field("f", arr.type, nullable=False)])
+    no_nulls = _fsl(pa.array([], pa.int32()), 0, None, 3)
+    final = sha(hr(), sd(b'{"f":{"data_type":' + t_json + b',"nullable":false}}'), u64(3), empty_child)
+    assert f2.hash_record_batch(pa.record_batch([no_nulls], schema=schema)) == V + final
+    assert f2.hash_record_batch(pa.record_batch([no_nulls.slice(1)], schema=schema)) != V + final
+
+
+def test_fixed_size_list_slices_and_trailing_child_positions() -> None:
+    """Slot i covers child [(offset + i) * n, (offset + i + 1) * n): pyarrow's .values ignores the
+    array offset. Positions past len * n are not elements. (IPC normalizes both away, so the
+    golden vectors cannot pin this; the fresh array is pinned by fsl_fresh_rb_f0.)"""
+    fresh = _fsl(pa.array([1, 2, 7, 7, 3, None, 5, 6], pa.int32()), 2, [True, False, True, True], 4)
+    assert fresh.to_pylist() == [[1, 2], None, [3, None], [5, 6]]
+    # Physical slots: 0 (before the offset), 1..4 (the rows), 5 and two more child positions
+    # (trailing); the child array itself starts at offset 3.
+    child = pa.array([42, 42, 42, 0, 0, 1, 2, 7, 7, 3, None, 5, 6, 9, 9, 8, None], pa.int32()).slice(3)
+    sliced = _fsl(child, 2, [True, True, False, True, True, True], 4, offset=1)
+    assert sliced.offset == 1 and sliced.to_pylist() == fresh.to_pylist()
+    trailing = _fsl(pa.array([1, 2, 7, 7, 3, None, 5, 6, 8, None], pa.int32()), 2, [True, False, True, True], 4)
+    schema = pa.schema([pa.field("f", fresh.type)])
+    expected = f2.hash_record_batch(pa.record_batch([fresh], schema=schema))
+    items = u64(6) + bytes([0b110111])  # entry "f/": items of slots 0, 2, 3
+    assert expected == V + sha(hr(), sd(b'{"f":{"data_type":' + _FSL_I32 + b',"nullable":true}}'), u64(4),
+                               u64(4) + b"\x0d", items, sha(i32(1, 2, 3, 5, 6)))
+    for arr in (sliced, trailing, fresh.slice(1).slice(0, 0), fresh.slice(2)):
+        got = f2.hash_record_batch(pa.record_batch([arr], schema=schema))
+        same = f2.hash_record_batch(pa.record_batch([pa.array(arr.to_pylist(), fresh.type)], schema=schema))
+        assert got == same
+    assert f2.hash_record_batch(pa.record_batch([sliced], schema=schema)) == expected
+    assert f2.hash_record_batch(pa.record_batch([trailing], schema=schema)) == expected
+    assert f2.hash_array(sliced) == f2.hash_array(trailing) == f2.hash_array(fresh)
+    d = f2.Digester(schema)
+    for start, stop in ((0, 1), (1, 1), (1, 3), (3, 4)):
+        d.update(pa.record_batch([sliced.slice(start, stop - start)], schema=schema))
+    assert d.finalize() == expected
+
+
+def test_fixed_size_list_struct_masking_two_depths_on_sliced_arrays() -> None:
+    """s: Struct<t: Struct<f: FixedSizeList<Int32?, 2>?>?>?; the FSL's own validity and both
+    struct validities disagree, every level sits at a different offset, and hidden child
+    positions hold junk. Logical rows: s = [1,0,1,1,1], t = [1,1,0,1,1], f = [0,1,1,1,1]; the
+    effectively valid slots are rows 3 and 4: [3, null] and [5, 6]."""
+    f_type = pa.list_(pa.field("item", pa.int32(), nullable=True), 2)
+    t_type = pa.struct([pa.field("f", f_type, nullable=True)])
+    s_type = pa.struct([pa.field("t", t_type, nullable=True)])
+
+    def bitmap(valid: list[bool]) -> pa.Buffer:
+        return pa.py_buffer(sum(1 << i for i, ok in enumerate(valid) if ok).to_bytes((len(valid) + 7) // 8, "little"))
+
+    # f_full: 10 slots; rows 5..9 are logical rows 0..4, and two trailing child positions
+    # follow. Its values child itself has offset 1.
+    f_full_valid = [True] * 5 + [False, True, True, True, True]
+    junk = {5: [11, None], 6: [None, 12], 7: [13, 14]}  # hidden under f's own null, s's null, t's null
+    data = [*range(10)] + junk[5] + junk[6] + junk[7] + [3, None, 5, 6, 77, None]
+    values = pa.array([99, *data], pa.int32()).slice(1)
+    f_full = pa.Array.from_buffers(f_type, 10, [bitmap(f_full_valid)], children=[values])
+    f_child = f_full.slice(3)  # offset 3; t row k is f_full row 3 + k
+    t_valid = [True, False, True, True, False, True, True]  # t rows 2..6 are logical rows 0..4
+    t = pa.Array.from_buffers(t_type, 7, [bitmap(t_valid)], children=[f_child])
+    s = pa.Array.from_buffers(s_type, 5, [bitmap([False, False, True, False, True, True, True])], offset=2,
+                              children=[t])
+    assert s.to_pylist() == [{"t": {"f": None}}, None, {"t": None}, {"t": {"f": [3, None]}}, {"t": {"f": [5, 6]}}]
+
+    fresh = pa.array(s.to_pylist(), s_type)
+    schema = pa.schema([pa.field("s", s_type, nullable=True)])
+    json_ = (b'{"s":{"data_type":{"Struct":[{"data_type":{"Struct":[{"data_type":' + _FSL_I32 +
+             b',"name":"f","nullable":true}]},"name":"t","nullable":true}]},"nullable":true}}')
+    expected = V + sha(
+        hr(), sd(json_), u64(5),
+        u64(5) + b"\x1d",  # s:      [1,0,1,1,1]
+        u64(5) + b"\x19",  # s/t:    [1,0,0,1,1]
+        u64(5) + b"\x18",  # s/t/f:  [0,0,0,1,1]
+        u64(4) + b"\x0d",  # s/t/f/: [1,0,1,1]
+        sha(i32(3, 5, 6)),
+    )
+    for arr in (s, fresh):
+        assert f2.hash_record_batch(pa.record_batch([arr], schema=schema)) == expected
+        d = f2.Digester(schema)
+        for row in range(5):
+            d.update(pa.record_batch([arr.slice(row, 1)], schema=schema))
+        assert d.finalize() == expected
+    assert f2.hash_array(s) == f2.hash_array(fresh)
+
+
+def test_fixed_size_list_non_nullable_slots_and_items() -> None:
+    """Spec 7 item 4: a visible null (slot of a non-nullable FSL, or item of a non-nullable
+    element) is rejected; nulls hidden under a null slot are accepted and ignored."""
+    t = pa.list_(pa.field("item", pa.int32(), nullable=False), 2)
+    nullable = pa.schema([pa.field("f", t, nullable=True)])
+    hidden = _fsl(pa.array([1, 2, None, None, 3, 4], pa.int32()), 2, [True, False, True], 3, item_nullable=False)
+    clean = _fsl(pa.array([1, 2, 0, 0, 3, 4], pa.int32()), 2, [True, False, True], 3, item_nullable=False)
+    assert f2.hash_record_batch(pa.record_batch([hidden], schema=nullable)) == f2.hash_record_batch(
+        pa.record_batch([clean], schema=nullable))
+    assert f2.hash_array(hidden) == f2.hash_array(clean)
+
+    visible = _fsl(pa.array([1, None, 0, 0, 3, 4], pa.int32()), 2, [True, False, True], 3, item_nullable=False)
+    with pytest.raises(ValueError, match="Non-nullable field 'f/' contains nulls"):
+        f2.hash_record_batch(pa.record_batch([visible], schema=nullable))
+    with pytest.raises(ValueError, match="Non-nullable field '/' contains nulls"):
+        f2.hash_array(visible)
+    non_nullable = pa.schema([pa.field("f", t, nullable=False)])
+    with pytest.raises(ValueError, match="Non-nullable field 'f' contains nulls"):
+        f2.hash_record_batch(pa.record_batch([clean], schema=non_nullable))
+    # A rejected batch leaves the digester unchanged.
+    d = f2.Digester(nullable)
+    d.update(pa.record_batch([clean], schema=nullable))
+    with pytest.raises(ValueError):
+        d.update(pa.record_batch([visible], schema=nullable))
+    assert d.finalize() == f2.hash_record_batch(pa.record_batch([clean], schema=nullable))
+
+
+def test_fixed_size_list_differs_from_list_and_from_other_sizes() -> None:
+    """Maintainer decision: a fixed-size list is not type-identical to a variable-size list
+    (List and LargeList are: both are LargeList in the canonical form)."""
+    rows = [[1, 2], [3, 4]]
+    assert f2.hash_array(pa.array(rows, pa.list_(pa.int32()))) == f2.hash_array(pa.array(rows, pa.large_list(pa.int32())))
+    hashes = {f2.hash_array(pa.array(rows, t)) for t in (pa.list_(pa.int32(), 2), pa.list_(pa.int32()))}
+    hashes.add(f2.hash_array(pa.array([b"\x01\x02", b"\x03\x04"], pa.binary(2))))
+    hashes.add(f2.hash_array(pa.FixedSizeListArray.from_arrays(pa.array([1, 2, 3, 4], pa.int32()), 4)))
+    hashes.add(f2.hash_array(pa.FixedSizeListArray.from_arrays(pa.array([1, 2, 3, 4], pa.int32()), 1)))
+    assert len(hashes) == 5
+    schema_hashes = {f2.hash_schema(pa.schema([pa.field("f", t)]))
+                     for t in (pa.list_(pa.int32(), 2), pa.list_(pa.int32(), 3), pa.list_(pa.int32()))}
+    assert len(schema_hashes) == 3
+
+
+def test_dictionary_of_fixed_size_list_equals_plain() -> None:
+    t = pa.list_(pa.field("item", pa.int32(), nullable=False), 2)
+    values = _fsl(pa.array([1, 2, None, None, 3, 4], pa.int32()), 2, [True, False, True], 3, item_nullable=False)
+    keys = pa.array([2, None, 1, 0, 2], pa.int8())
+    dict_arr = pa.DictionaryArray.from_arrays(keys, values)
+    plain = pa.array([[3, 4], None, None, [1, 2], [3, 4]], t)
+    assert f2.hash_array(dict_arr) == f2.hash_array(plain)
+    for arr in (dict_arr, dict_arr.slice(1)):
+        ref = plain if arr is dict_arr else plain.slice(1)
+        assert f2.hash_record_batch(pa.record_batch([arr], names=["f"])) == f2.hash_record_batch(
+            pa.record_batch([ref], names=["f"]))
+
+
+@pytest.mark.parametrize("budget", [1, 2, 3, 5, 64])
+def test_fixed_size_list_items_visited_in_bounded_chunks(budget, monkeypatch) -> None:
+    """Slots with nulls are visited in chunks of about _ITEM_BUDGET items; any chunk size gives
+    the hash of one pass (the reference is computed with the default budget)."""
+    t = pa.list_(pa.field("item", pa.list_(pa.utf8()), nullable=True), 3)
+    rows = [[["a"], None, []], None, [["b", None], ["c"], None], None, None, [[], [], ["d"]], [None, None, None]]
+    arr = pa.array(rows, t)
+    nested = pa.array([rows, None, rows[2:]], pa.list_(t))  # List<FixedSizeList<...>>
+    expected = [f2.hash_array(a) for a in (arr, arr.slice(2), nested)]
+    monkeypatch.setattr(f2, "_ITEM_BUDGET", budget)
+    assert [f2.hash_array(a) for a in (arr, arr.slice(2), nested)] == expected
+
+
+def test_fixed_size_list_without_nulls_builds_no_item_index(monkeypatch) -> None:
+    """Without null slots the child is one zero-copy slice: no per-item index or mask."""
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("per-item index built on the null-free path")
+
+    arr = pa.FixedSizeListArray.from_arrays(pa.array(range(4 * 384), pa.float32()), 384)
+    expected = f2.hash_array(arr)
+    batch = pa.record_batch([arr], names=["lfp"])
+    expected_rb = f2.hash_record_batch(batch)
+    monkeypatch.setattr(f2, "_repeat_each", forbidden)
+    monkeypatch.setattr(f2.pc, "list_parent_indices", forbidden)
+    monkeypatch.setattr(f2.pc, "take", forbidden)
+    monkeypatch.setattr(f2.pc, "filter", forbidden)
+    assert f2.hash_array(arr) == expected
+    assert f2.hash_record_batch(batch) == expected_rb

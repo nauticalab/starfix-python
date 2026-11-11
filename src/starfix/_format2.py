@@ -46,6 +46,7 @@ def _require_little_endian() -> None:
 _U64 = struct.Struct("<Q")
 _CHUNK = 1 << 16  # Booleans per chunk when expanding them to one byte each
 _BYTE_BUDGET = 1 << 20  # bytes per digest update when serializing variable-length values
+_ITEM_BUDGET = 1 << 20  # fixed-size-list items per chunk when some slots are not visited
 
 
 def flags_of(ordered_columns: bool, ordered_struct_fields: bool) -> int:
@@ -422,7 +423,14 @@ class _Entry:
 
     def __init__(self, field: pa.Field) -> None:
         t = _logical(field.type)
-        self.kind = "struct" if pa.types.is_struct(t) else "list" if _is_list(t) else "leaf"
+        if pa.types.is_struct(t):
+            self.kind = "struct"
+        elif _is_list(t):
+            self.kind = "list"
+        elif pa.types.is_fixed_size_list(t):
+            self.kind = "fixed_size_list"  # Section 3.2: validity only (n is in the schema)
+        else:
+            self.kind = "leaf"
         self.validity = _Bits() if field.nullable else None
         self.lengths = hashlib.sha256() if self.kind == "list" else None
         self.values = hashlib.sha256() if self.kind == "leaf" else None
@@ -663,8 +671,8 @@ def _visit(
     """Feed the elements of the node `field` at `path` into its entry (Section 3.2).
 
     `arr` holds the node's candidate elements; `select` (None: all) marks which of them are
-    elements at all: below a list, the items of valid list values (items of null or masked
-    list values are not visited). `enclosing` is the AND of the enclosing struct validities
+    elements at all: below a list or fixed-size list, the items of valid list values (items
+    of null or masked list values are not visited). `enclosing` is the AND of the enclosing struct validities
     at this list level (None: all valid). Value payloads (string/binary bytes, list
     children) are not copied: list children are zero-copy slices of the original values with
     a selection mask. Per-element metadata is still allocated: validity bitmaps, list lengths
@@ -721,13 +729,57 @@ def _visit(
         _visit(arr.type.value_field, items, path + "/", None, entries, item_select)
         return
 
+    if entry.kind == "fixed_size_list":
+        _visit_fixed_size_list_items(arr, present, path + "/", entries)
+        return
+
     _hash_values(arr, present, entry.values)
+
+
+def _visit_fixed_size_list_items(arr: pa.FixedSizeListArray, present: pa.Array | None, path: str,
+                                 entries: dict) -> None:
+    """The element node of a fixed-size list (Section 3.2): the n items of every slot marked
+    in `present` (None: all), in order. Items of other slots and child positions past
+    len * n are not elements and are never visited.
+
+    pyarrow's ``FixedSizeListArray.values`` ignores the array offset, so slot i covers
+    ``values[(offset + i) * n, (offset + i + 1) * n)``. The items are visited zero-copy as
+    one slice of the child when all slots are elements (no per-item index or mask is built);
+    otherwise the slots are visited in chunks of about _ITEM_BUDGET items (entries are
+    streams, so chunks hash like one pass), each chunk with the slot bits repeated n times as
+    the item selection, skipping chunks without any element and selecting nothing in chunks
+    of elements only. As for List, a fixed-size-list boundary resets struct masking.
+    """
+    n = arr.type.list_size
+    element = arr.type.value_field
+    items = arr.values.slice(arr.offset * n, len(arr) * n)
+    if present is None or n == 0:
+        _visit(element, items, path, None, entries)
+        return
+    slots = max(1, _ITEM_BUDGET // n)
+    for start in range(0, len(arr), slots):
+        chosen = present.slice(start, slots)
+        count = len(chosen)
+        valid = chosen.true_count
+        if valid == 0:
+            continue
+        item_select = None
+        if valid < count:
+            item_select = _repeat_each(chosen, n)
+        _visit(element, items.slice(start * n, count * n), path, None, entries, item_select)
+
+
+def _repeat_each(bits: pa.Array, n: int) -> pa.Array:
+    """Every bit of `bits` n times in a row. The parent indices come from a FixedSizeList of
+    nulls without validity (list_parent_indices skips null fixed-size-list slots)."""
+    slots = pa.FixedSizeListArray.from_arrays(pa.nulls(len(bits) * n), n)
+    return pc.take(bits, pc.list_parent_indices(slots))
 
 
 def _is_unsupported_data(t: pa.DataType) -> bool:
     """Section 8: types whose schema hashes but whose data does not."""
     return (
-        pa.types.is_null(t) or pa.types.is_fixed_size_list(t) or pa.types.is_map(t)
+        pa.types.is_null(t) or pa.types.is_map(t)
         or str(t) in _INTERVALS or str(t) in ("string_view", "binary_view")
     )
 
