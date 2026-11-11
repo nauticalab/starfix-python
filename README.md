@@ -99,12 +99,15 @@ rebuilds the type from them, so starfix-python hashes what pyarrow can observe:
   whether the type is registered in the hashing process.
 - **pyarrow's built-in canonical extension types** (`arrow.uuid`, `arrow.json`, `arrow.bool8`,
   `arrow.opaque`, `arrow.fixed_shape_tensor`, `arrow.variable_shape_tensor`, depending on the
-  pyarrow version): pyarrow re-serializes their metadata and rebuilds their storage type, so
-  the hash is defined only for the canonical stored form, the one every Arrow implementation
-  writes. It differs from Rust when the stored data is not canonical, for example:
-  `arrow.json` stored with metadata `{}` instead of `""`; `arrow.opaque` or tensor metadata
-  JSON with another key order or whitespace; a fixed-shape tensor stored over a non-nullable
-  item field.
+  pyarrow version): they have no `__arrow_ext_serialize__` in Python, so both keys are read
+  from the field exported through the Arrow C data interface (`field.__arrow_c_schema__()`),
+  which carries the serialization pyarrow reconstructs from its own definition; pyarrow also
+  rebuilds their storage type. Their hash is therefore defined only when the stored
+  `ARROW:extension:metadata` is byte-identical to that serialization and the stored storage
+  type is the one pyarrow rebuilds (the form every Arrow implementation writes). Known stored
+  forms that differ from Rust: `arrow.json` stored with `{}` (pyarrow reconstructs `""`);
+  `arrow.opaque` or tensor metadata JSON with another key order or with whitespace; a
+  fixed-shape tensor stored over a non-nullable item field.
 
 ## Rejected inputs
 

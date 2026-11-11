@@ -85,6 +85,7 @@ def test_map_example() -> None:
         b'{"data_type":"Int32","name":"z","nullable":false}]},"nullable":true}}},"nullable":true}}'
     )
     assert f2.hash_schema(schema) == V + sha(hs(), json_)
+    assert f2.hash_schema(schema).hex() == "000002f772b5bc6bb814d98a3bb68a6148dde15eaa590ad54b289c51f9cc4636a52ba7"  # printed
 
 
 def test_fixed_size_list_example() -> None:
@@ -92,12 +93,14 @@ def test_fixed_size_list_example() -> None:
 
     json_ = b'{"f":{"data_type":{"FixedSizeList":[{"data_type":"Int32","nullable":true},2]},"nullable":false}}'
     assert f2.hash_schema(schema) == V + sha(hs(), json_)
+    assert f2.hash_schema(schema).hex() == "0000022fe3f8d8fcba7e393f3c5808894db2f930a8bd8388e9d04b3763d369cc6eae88"  # printed
 
 
 def test_hash_array_non_ascii_example() -> None:
     arr = pa.StructArray.from_arrays([pa.array([1], pa.int32())], fields=[pa.field("é", pa.int32(), nullable=False)])
     type_json = '{"Struct":[{"data_type":"Int32","name":"é","nullable":false}]}'.encode()
     assert f2.hash_array(arr) == V + sha(ha(), type_json, u64(1), all_valid(1), sha(i32(1)))
+    assert f2.hash_array(arr).hex() == "00000219e467d0280ccc83ad4c67e063997344cedd781f6cb4e449d03d713c989aa12b"  # printed
 
 
 def test_json_text_rules() -> None:

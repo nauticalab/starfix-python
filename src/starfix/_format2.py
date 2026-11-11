@@ -226,53 +226,54 @@ def _extension_metadata(t: pa.DataType) -> dict[str, str]:
 def _exported_metadata_pairs(obj) -> list[tuple[bytes, bytes]]:
     """Key/value pairs of a Field's, Schema's or DataType's metadata as Arrow exports them.
 
-    Read through the Arrow C data interface (ArrowSchema.metadata, a fixed, documented ABI:
-    int32 count, then per pair int32 length + key bytes, int32 length + value bytes). Unlike
-    pyarrow's ``metadata`` dict this keeps duplicate keys, and for a registered extension
-    type it carries the ARROW:extension:* keys pyarrow writes for the type.
+    Read through the Arrow C data interface: ``obj.__arrow_c_schema__()`` returns a PyCapsule
+    holding an ``ArrowSchema`` (a fixed, documented ABI) whose metadata is int32 count, then
+    per pair int32 length + key bytes, int32 length + value bytes. Unlike pyarrow's
+    ``metadata`` dict this keeps duplicate keys, and for a registered extension type it
+    carries the ARROW:extension:* keys as the type serializes them. The capsule owns the
+    exported schema and releases it.
     """
     import ctypes
 
     class _ArrowSchema(ctypes.Structure):
-        pass
+        _fields_ = [
+            ("format", ctypes.c_char_p),
+            ("name", ctypes.c_char_p),
+            ("metadata", ctypes.c_void_p),
+            ("flags", ctypes.c_int64),
+            ("n_children", ctypes.c_int64),
+            ("children", ctypes.c_void_p),
+            ("dictionary", ctypes.c_void_p),
+            ("release", ctypes.c_void_p),
+            ("private_data", ctypes.c_void_p),
+        ]
 
-    _ArrowSchema._fields_ = [
-        ("format", ctypes.c_char_p),
-        ("name", ctypes.c_char_p),
-        ("metadata", ctypes.c_void_p),
-        ("flags", ctypes.c_int64),
-        ("n_children", ctypes.c_int64),
-        ("children", ctypes.c_void_p),
-        ("dictionary", ctypes.c_void_p),
-        ("release", ctypes.CFUNCTYPE(None, ctypes.c_void_p)),
-        ("private_data", ctypes.c_void_p),
-    ]
-    c_schema = _ArrowSchema()
-    obj._export_to_c(ctypes.addressof(c_schema))
-    try:
-        pairs: list[tuple[bytes, bytes]] = []
-        if c_schema.metadata:
-            pos = c_schema.metadata
+    get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+    get_pointer.restype = ctypes.c_void_p
+    get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    capsule = obj.__arrow_c_schema__()
+    c_schema = _ArrowSchema.from_address(get_pointer(capsule, b"arrow_schema"))
+    pairs: list[tuple[bytes, bytes]] = []
+    if c_schema.metadata:
+        pos = c_schema.metadata
 
-            def read_int32() -> int:
-                nonlocal pos
-                value = ctypes.c_int32.from_address(pos).value
-                pos += 4
-                return value
+        def read_int32() -> int:
+            nonlocal pos
+            value = ctypes.c_int32.from_address(pos).value
+            pos += 4
+            return value
 
-            def read_bytes(n: int) -> bytes:
-                nonlocal pos
-                value = ctypes.string_at(pos, n)
-                pos += n
-                return value
+        def read_bytes(n: int) -> bytes:
+            nonlocal pos
+            value = ctypes.string_at(pos, n)
+            pos += n
+            return value
 
-            for _ in range(read_int32()):
-                key = read_bytes(read_int32())
-                pairs.append((key, read_bytes(read_int32())))
-        return pairs
-    finally:
-        if c_schema.release:
-            c_schema.release(ctypes.addressof(c_schema))
+        for _ in range(read_int32()):
+            key = read_bytes(read_int32())
+            pairs.append((key, read_bytes(read_int32())))
+    del c_schema, capsule  # the capsule's destructor releases the exported schema
+    return pairs
 
 
 def _exported_extension_metadata(t: pa.DataType) -> bytes:
