@@ -22,32 +22,35 @@ class _Hasher(Protocol):
     def update(self, data: bytes | bytearray, /) -> None: ...
 
 
-# Hash format version prefix. ITL-898 variant (b), pending the developer's decision:
-# bump to b"\x00\x00\x02" so that every hash taken with the fixed layout differs
-# from every v0.4.0 hash.
-VERSION_BYTES = b"\x00\x00\x01"
+# Hash format version (developer decision 2026-11-11: bump it). Format 1 is the
+# v0.4.0 layout. Format 2 (pending the regenerated Rust spec and golden file) is the
+# corrected lossless layout with every default-mode alignment below; switching to it
+# is this one line. The version prefix is the 3-byte big-endian format number.
+_FORMAT_VERSION = 1
+VERSION_BYTES = _FORMAT_VERSION.to_bytes(3, "big")
 DELIMITER = "/"
 
+_FORMAT_2 = _FORMAT_VERSION >= 2
+
 # ---------------------------------------------------------------------------
-# Default-mode decisions pending for ITL-898. Each is one switch: flipping it to
-# True applies the Rust/spec behaviour with no options on (it is already applied
-# whenever an option is on). tests/test_known_divergences.py checks each flipped
-# switch against the Rust values, and pins the current default as strict xfails.
+# Default-mode changes that format 2 brings. Each is a separate switch so that it
+# can be tested on its own: True applies the Rust/spec behaviour with no options on
+# (it already applies whenever an option is on). tests/test_known_divergences.py
+# checks each switch against the Rust values and pins format 1 as strict xfails.
 # ---------------------------------------------------------------------------
 
-# Lossless layout (spec 9.5 / 9.5.1) in the default: developer ruling 2026-11-11
-# makes it the only layout once the regenerated Rust golden values land.
-_LOSSLESS_BY_DEFAULT = False
+# Lossless layout (spec 9.5 / 9.5.1): developer ruling 2026-11-11, the only layout in format 2.
+_LOSSLESS_BY_DEFAULT = _FORMAT_2
 # Map schema JSON: entries field (Struct[key, value]) and keys_sorted (spec 2.1).
-_FIX_DEFAULT_MAP_JSON = False
+_FIX_DEFAULT_MAP_JSON = _FORMAT_2
 # hash_array type JSON: non-ASCII written raw, as serde_json does (spec 2.1).
-_FIX_DEFAULT_TYPE_JSON_UTF8 = False
-# Null / Interval / Utf8View / BinaryView schema forms (spec 2.1), raising today.
-_FIX_DEFAULT_TYPE_FORMS = False
+_FIX_DEFAULT_TYPE_JSON_UTF8 = _FORMAT_2
+# Null / Interval / Utf8View / BinaryView schema forms (spec 2.1); format 1 raises.
+_FIX_DEFAULT_TYPE_FORMS = _FORMAT_2
 # Phase 2 metadata paths of map fields: entries m/, key m//key, value m//value (2.2.1).
-_FIX_DEFAULT_MAP_METADATA_PATHS = False
+_FIX_DEFAULT_MAP_METADATA_PATHS = _FORMAT_2
 # Streaming: reject a batch whose schema differs from the digester's (spec 9.7).
-_FIX_DEFAULT_BATCH_CHECK = False
+_FIX_DEFAULT_BATCH_CHECK = _FORMAT_2
 
 # Hashing options (spec Section 9.1): keyword name -> bit of the flags byte.
 # This table is the single place that names the options; the keyword arguments of
