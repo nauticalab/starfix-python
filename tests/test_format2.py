@@ -723,3 +723,45 @@ def test_zero_width_fixed_size_binary() -> None:
     st = pa.StructArray.from_arrays([pa.array([b"", b""], pa.binary(0))], fields=[pa.field("z", pa.binary(0), nullable=False)],
                                     mask=pa.array([False, True]))
     f2.hash_record_batch(pa.record_batch([st], names=["s"]))  # masked by a nullable struct
+
+
+# ── Inputs from the Rust review (ITL-898) ───────────────────────────────
+
+
+def test_dictionary_of_list_equals_plain_list() -> None:
+    """A dictionary whose values are a List (32-bit offsets) hashes as the plain list."""
+    lt = pa.list_(pa.int32())
+    dict_arr = pa.DictionaryArray.from_arrays(pa.array([0, 1, 0, 2, None], pa.int8()), pa.array([[1, 2], [3], None], lt))
+    plain = pa.array([[1, 2], [3], [1, 2], None, None], lt)
+    assert f2.hash_array(dict_arr) == f2.hash_array(plain)
+    assert f2.hash_record_batch(pa.record_batch([dict_arr], names=["c"])) == f2.hash_record_batch(
+        pa.record_batch([plain], names=["c"])
+    )
+    s_dict = pa.StructArray.from_arrays([dict_arr], names=["l"])
+    s_plain = pa.StructArray.from_arrays([plain], names=["l"])
+    assert f2.hash_record_batch(pa.record_batch([s_dict], names=["s"])) == f2.hash_record_batch(
+        pa.record_batch([s_plain], names=["s"])
+    )
+
+
+def test_list_non_nullable_items_with_hidden_child_nulls() -> None:
+    """Child nulls under a null list slot or outside the offsets are not elements (accepted)."""
+    t = pa.list_(pa.field("item", pa.int32(), nullable=False))
+    schema = pa.schema([pa.field("l", t)])
+    child = pa.array([1, None, 2, None], pa.int32())
+    under_null_slot = pa.ListArray.from_arrays(
+        pa.array([0, 1, 2, 3], pa.int32()), child.slice(0, 3), mask=pa.array([False, True, False])
+    ).cast(t)
+    clean = pa.ListArray.from_arrays(
+        pa.array([0, 1, 1, 2], pa.int32()), pa.array([1, 2], pa.int32()), mask=pa.array([False, True, False])
+    ).cast(t)
+    assert f2.hash_record_batch(pa.record_batch([under_null_slot], schema=schema)) == f2.hash_record_batch(
+        pa.record_batch([clean], schema=schema)
+    )
+    outside_offsets = pa.ListArray.from_arrays(pa.array([0, 1, 1], pa.int32()), child).cast(t)
+    assert f2.hash_record_batch(pa.record_batch([outside_offsets], schema=schema)) == f2.hash_record_batch(
+        pa.record_batch([pa.array([[1], []], t)], schema=schema)
+    )
+    visible = pa.ListArray.from_arrays(pa.array([0, 2], pa.int32()), pa.array([1, None], pa.int32())).cast(t)
+    with pytest.raises(ValueError, match="Non-nullable"):
+        f2.hash_array(visible)
