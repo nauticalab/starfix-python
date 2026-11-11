@@ -26,7 +26,8 @@ ORDERED_STRUCT_FIELDS = 0x02
 
 _SCHEMA_MISMATCH = "Record batch schema does not match ArrowDigester schema"
 _U64 = struct.Struct("<Q")
-_CHUNK = 1 << 16  # elements per chunk when serializing values (bounds temporary memory)
+_CHUNK = 1 << 16  # Booleans per chunk when expanding them to one byte each
+_BYTE_BUDGET = 1 << 20  # bytes per digest update when serializing variable-length values
 
 
 def flags_of(ordered_columns: bool, ordered_struct_fields: bool) -> int:
@@ -270,7 +271,10 @@ def _exported_extension_metadata(t: pa.DataType) -> bytes:
 
 def _field_metadata(field: pa.Field) -> dict[str, str]:
     meta = _decode(field.metadata)
-    meta.update(_extension_metadata(field.type))
+    t = field.type
+    while pa.types.is_dictionary(t):  # a dictionary of an extension type keeps its keys
+        t = t.value_type
+    meta.update(_extension_metadata(t))
     # Section 2.3: an absent ARROW:extension:metadata is hashed as "" (absent == empty).
     if "ARROW:extension:name" in meta:
         meta.setdefault("ARROW:extension:metadata", "")
@@ -341,6 +345,17 @@ class _Bits:
     def entry_bytes(self) -> bytes:
         return _U64.pack(self._len) + bytes(self._bytes)
 
+    def snapshot(self) -> tuple[int, int, int | None]:
+        """O(1) state: appends only add bytes or change the last (partial) byte."""
+        return self._len, len(self._bytes), (self._bytes[-1] if self._bytes else None)
+
+    def restore(self, state: tuple[int, int, int | None]) -> None:
+        bit_len, byte_len, last = state
+        del self._bytes[byte_len:]
+        if last is not None:
+            self._bytes[-1] = last
+        self._len = bit_len
+
 
 class _Entry:
     __slots__ = ("validity", "lengths", "values", "kind")
@@ -351,6 +366,18 @@ class _Entry:
         self.validity = _Bits() if field.nullable else None
         self.lengths = hashlib.sha256() if self.kind == "list" else None
         self.values = hashlib.sha256() if self.kind == "leaf" else None
+
+    def snapshot(self) -> tuple:
+        return (
+            self.validity.snapshot() if self.validity is not None else None,
+            self.lengths.copy() if self.lengths is not None else None,
+            self.values.copy() if self.values is not None else None,
+        )
+
+    def restore(self, state: tuple) -> None:
+        validity, self.lengths, self.values = state
+        if validity is not None:
+            self.validity.restore(validity)
 
     def to_bytes(self) -> bytes:
         out = b""
@@ -417,12 +444,26 @@ def _hash_values(arr: pa.Array, digest) -> None:
         bufs = arr.buffers()
         offsets = memoryview(bufs[1])[arr.offset * size:(arr.offset + n + 1) * size].cast("q" if large else "i")
         data = memoryview(bufs[2]) if bufs[2] is not None else memoryview(b"")
-        for start in range(0, n, _CHUNK):
-            parts = []
-            for i in range(start, min(start + _CHUNK, n)):
-                a, b = offsets[i], offsets[i + 1]
-                parts.append(_U64.pack(b - a))
-                parts.append(data[a:b])
+        # Small values are joined into updates of about _BYTE_BUDGET bytes; a value of at
+        # least that size is fed straight from the data buffer (no copy).
+        parts: list = []
+        pending = 0
+        for i in range(n):
+            a, b = offsets[i], offsets[i + 1]
+            size = b - a
+            if size >= _BYTE_BUDGET:
+                parts.append(_U64.pack(size))
+                digest.update(b"".join(parts))
+                digest.update(data[a:b])
+                parts, pending = [], 0
+                continue
+            parts.append(_U64.pack(size))
+            parts.append(data[a:b])
+            pending += 8 + size
+            if pending >= _BYTE_BUDGET:
+                digest.update(b"".join(parts))
+                parts, pending = [], 0
+        if parts:
             digest.update(b"".join(parts))
         return
     raise ValueError(f"Hashing data of type {t} is not supported")  # checked earlier (Section 7)
@@ -522,9 +563,17 @@ class Digester:
         schema_nodes(schema)  # Section 7
         if schema_key(schema, self._include_metadata, self._flags) != self._key:
             raise ValueError(_SCHEMA_MISMATCH)
-        for i in range(batch.num_columns):
-            field = schema.field(i)
-            _visit(field, batch.column(i), field.name, None, self._entries)
+        # A batch rejected while it is traversed (Section 7 item 4) leaves the digester
+        # exactly as it was.
+        saved = {path: entry.snapshot() for path, entry in self._entries.items()}
+        try:
+            for i in range(batch.num_columns):
+                field = schema.field(i)
+                _visit(field, batch.column(i), field.name, None, self._entries)
+        except BaseException:
+            for path, state in saved.items():
+                self._entries[path].restore(state)
+            raise
         self._rows += batch.num_rows
 
     def finalize(self) -> bytes:

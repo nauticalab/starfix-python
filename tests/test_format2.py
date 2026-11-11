@@ -614,3 +614,79 @@ def test_slices_at_bit_and_byte_boundaries(offset: int) -> None:
         b_sliced = pa.record_batch([sliced], names=["c"])
         b_fresh = pa.record_batch([fresh], names=["c"])
         assert f2.hash_record_batch(b_sliced) == f2.hash_record_batch(b_fresh), (arr.type, offset)
+
+
+# ── Copilot review round (PR #9) ─────────────────────────────────────────
+
+
+def test_unmasked_null_in_non_nullable_column_rejected() -> None:
+    schema = pa.schema([pa.field("a", pa.int32(), nullable=False)])
+    batch = pa.record_batch([pa.array([1, None], pa.int32())], schema=schema)
+    with pytest.raises(ValueError, match="Non-nullable"):
+        f2.hash_record_batch(batch)
+
+
+def test_unmasked_null_in_non_nullable_struct_child_rejected() -> None:
+    st = pa.struct([pa.field("x", pa.int32(), nullable=False)])
+    s = pa.StructArray.from_arrays([pa.array([1, None], pa.int32())], fields=list(st))  # struct valid, child null
+    with pytest.raises(ValueError, match="Non-nullable"):
+        f2.hash_record_batch(pa.record_batch([s], schema=pa.schema([pa.field("s", st, nullable=True)])))
+
+
+def test_dictionary_index_to_null_value_in_non_nullable_column_rejected() -> None:
+    arr = pa.DictionaryArray.from_arrays(pa.array([0, 1], pa.int8()), pa.array(["a", None]))
+    schema = pa.schema([pa.field("d", arr.type, nullable=False)])
+    with pytest.raises(ValueError, match="Non-nullable"):
+        f2.hash_record_batch(pa.record_batch([arr], schema=schema))
+
+
+def test_child_null_masked_by_null_parent_is_accepted() -> None:
+    st = pa.struct([pa.field("x", pa.int32(), nullable=False)])
+    s = pa.StructArray.from_arrays([pa.array([1, None], pa.int32())], fields=list(st), mask=pa.array([False, True]))
+    schema = pa.schema([pa.field("s", st, nullable=True)])
+    final = sha(f2.hash_schema(schema)[3:], u64(2), u64(2) + b"\x01", sha(i32(1)))
+    assert f2.hash_record_batch(pa.record_batch([s], schema=schema)) == V + final
+
+
+def test_rejected_batch_leaves_the_digester_unchanged() -> None:
+    """A batch rejected while it is traversed must not change the digester's state."""
+    schema = pa.schema([pa.field("a", pa.int32(), nullable=False), pa.field("b", pa.int32(), nullable=False)])
+    good = pa.record_batch([pa.array([1], pa.int32()), pa.array([2], pa.int32())], schema=schema)
+    bad = pa.record_batch([pa.array([7], pa.int32()), pa.array([None], pa.int32())], schema=schema)
+    d = f2.Digester(schema)
+    d.update(good)
+    with pytest.raises(ValueError):
+        d.update(bad)
+    assert d.finalize() == f2.hash_record_batch(good)
+
+
+def test_dictionary_of_extension_metadata_is_hashed(point_type) -> None:
+    km = pa.schema([pa.field("p", pa.dictionary(pa.int32(), point_type("km")))])
+    m = pa.schema([pa.field("p", pa.dictionary(pa.int32(), point_type("m")))])
+    assert f2.hash_schema(km, include_metadata=True) != f2.hash_schema(m, include_metadata=True)
+    phase2 = f2.phase2_json(km)
+    assert '"ARROW:extension:name":"starfix.test.point"' in phase2
+    assert '"ARROW:extension:metadata":"{\\"unit\\":\\"km\\"}"' in phase2
+
+
+def test_binary_values_hashed_with_a_byte_budget(monkeypatch) -> None:
+    """Large values are not copied into one joined buffer; the bytes are unchanged."""
+    monkeypatch.setattr(f2, "_BYTE_BUDGET", 10)
+    values = [b"x" * 25, b"", b"abc", None, b"y" * 9, b"z" * 11]
+    arr = pa.array(values, pa.binary())
+    expected = b"".join(u64(len(v)) + v for v in values if v is not None)
+    valid = u64(6) + bytes([0b110111])
+    assert f2.hash_array(arr) == V + sha(header(0), b'"LargeBinary"', u64(6), valid, sha(expected))
+
+
+def test_rejected_batch_restores_partial_validity_bytes() -> None:
+    """Rollback restores validity bits that end mid-byte, and the hash states."""
+    schema = pa.schema([pa.field("a", pa.int32(), nullable=True), pa.field("b", pa.utf8(), nullable=False)])
+    good = pa.record_batch([pa.array([1, None, 3], pa.int32()), pa.array(["x", "y", "z"])], schema=schema)
+    bad = pa.record_batch([pa.array([None] * 7 + [4], pa.int32()), pa.array(["p"] * 7 + [None])], schema=schema)
+    d = f2.Digester(schema)
+    d.update(good)
+    with pytest.raises(ValueError):
+        d.update(bad)
+    d.update(good)
+    assert d.finalize() == f2.hash_table(pa.Table.from_batches([good, good]))
