@@ -34,6 +34,29 @@ _OPTION_FLAGS: dict[str, int] = {
     "nested_validity": 0x04,
 }
 
+# Options tag prefix (spec Section 9.2); the flags byte is appended.
+_OPTIONS_TAG_PREFIX = b"\x00starfix-options-v1"
+
+_ORDERED_COLUMNS = _OPTION_FLAGS["ordered_columns"]
+_ORDERED_STRUCT_FIELDS = _OPTION_FLAGS["ordered_struct_fields"]
+_NESTED_VALIDITY = _OPTION_FLAGS["nested_validity"]
+
+_SCHEMA_MISMATCH = "Record batch schema does not match ArrowDigester schema"
+
+
+def _flags(ordered_columns: bool, ordered_struct_fields: bool, nested_validity: bool) -> int:
+    """Build the flags byte of spec Section 9.1 from the option values."""
+    return (
+        (_ORDERED_COLUMNS if ordered_columns else 0)
+        | (_ORDERED_STRUCT_FIELDS if ordered_struct_fields else 0)
+        | (_NESTED_VALIDITY if nested_validity else 0)
+    )
+
+
+def _options_tag(flags: int) -> bytes:
+    """Options tag (spec Section 9.2): 0x00 || "starfix-options-v1" || flags (20 bytes)."""
+    return _OPTIONS_TAG_PREFIX + bytes([flags])
+
 
 # ---------------------------------------------------------------------------
 # Bit-vector helper (LSB-first packing, matching bitvec<u8, Lsb0>)
@@ -75,31 +98,35 @@ class _BitVec:
 # Schema / DataType serialization  (spec Section 2)
 # ---------------------------------------------------------------------------
 
-def _data_type_to_value(dt: pa.DataType) -> object:
+def _data_type_to_value(dt: pa.DataType, ordered_struct_fields: bool = False) -> object:
     """Convert a pyarrow DataType to the JSON-compatible value that matches
     the canonical form described in spec Section 2.1.
 
     Types are normalized: Utf8→LargeUtf8, Binary→LargeBinary, List→LargeList,
-    Dictionary→value_type. Struct fields are sorted alphabetically.
+    Dictionary→value_type. Struct fields are sorted alphabetically, or kept in
+    declaration order when ``ordered_struct_fields`` is set (spec Section 9.3),
+    at every depth.
     """
     import pyarrow as pa
 
+    osf = ordered_struct_fields
     # Normalize: Dictionary → recurse on value type
     if pa.types.is_dictionary(dt):
-        return _data_type_to_value(dt.value_type)
+        return _data_type_to_value(dt.value_type, osf)
 
     if pa.types.is_struct(dt):
-        # Sort struct fields alphabetically by name
         fields = [dt.field(i) for i in range(dt.num_fields)]
-        fields.sort(key=lambda f: f.name)
-        fields_json = [_inner_field_to_value(f) for f in fields]
+        if not osf:
+            # Sort struct fields alphabetically by name
+            fields.sort(key=lambda f: f.name)
+        fields_json = [_inner_field_to_value(f, osf) for f in fields]
         return {"Struct": fields_json}
     if pa.types.is_list(dt) or pa.types.is_large_list(dt):
-        return {"LargeList": _element_type_to_value(dt.value_field)}
+        return {"LargeList": _element_type_to_value(dt.value_field, osf)}
     if pa.types.is_fixed_size_list(dt):
-        return {"FixedSizeList": [_element_type_to_value(dt.value_field), dt.list_size]}
+        return {"FixedSizeList": [_element_type_to_value(dt.value_field, osf), dt.list_size]}
     if pa.types.is_map(dt):
-        return {"Map": [_inner_field_to_value(dt.key_field.with_name("entries")), False]}
+        return {"Map": [_inner_field_to_value(dt.key_field.with_name("entries"), osf), False]}
 
     # Primitive / leaf types – must match Arrow-Rust serde
     return _primitive_data_type_string(dt)
@@ -166,22 +193,22 @@ def _primitive_data_type_string(dt: pa.DataType) -> object:
     raise NotImplementedError(f"Unsupported data type: {dt}")
 
 
-def _inner_field_to_value(field: pa.Field) -> dict:
+def _inner_field_to_value(field: pa.Field, ordered_struct_fields: bool = False) -> dict:
     """Convert a field to JSON with name, data_type, and nullable."""
     return {
         "name": field.name,
-        "data_type": _data_type_to_value(field.type),
+        "data_type": _data_type_to_value(field.type, ordered_struct_fields),
         "nullable": field.nullable,
     }
 
 
-def _element_type_to_value(field: pa.Field) -> dict:
+def _element_type_to_value(field: pa.Field, ordered_struct_fields: bool = False) -> dict:
     """Convert a container element field to JSON with only data_type and nullable (no name).
 
     Used for list and fixed-size list element types, matching Rust ``element_type_to_value``.
     """
     return {
-        "data_type": _data_type_to_value(field.type),
+        "data_type": _data_type_to_value(field.type, ordered_struct_fields),
         "nullable": field.nullable,
     }
 
@@ -207,6 +234,98 @@ def _serialized_schema(schema: pa.Schema) -> str:
     # Sort by field name (BTreeMap ordering)
     sorted_fields = OrderedDict(sorted(fields.items()))
     return json.dumps(sorted_fields, separators=(",", ":"), ensure_ascii=False)
+
+
+def _phase1_json(schema: pa.Schema, flags: int) -> str:
+    """Phase 1 canonical schema JSON for a flags byte (spec Sections 2.1 and 9.3).
+
+    ``flags == 0`` is exactly the default serialization (Section 2.1).
+    """
+    if flags == 0:
+        return _serialized_schema(schema)
+    osf = bool(flags & _ORDERED_STRUCT_FIELDS)
+    fields = [schema.field(i) for i in range(len(schema))]
+    if flags & _ORDERED_COLUMNS:
+        # Top level is an array of struct-child-form objects, in schema order.
+        doc: object = [_sort_json_value(_inner_field_to_value(f, osf)) for f in fields]
+    else:
+        doc = OrderedDict(sorted(
+            (f.name, _sort_json_value({
+                "data_type": _data_type_to_value(f.type, osf),
+                "nullable": f.nullable,
+            }))
+            for f in fields
+        ))
+    return json.dumps(doc, separators=(",", ":"), ensure_ascii=False)
+
+
+def _type_json(data_type: pa.DataType, flags: int) -> str:
+    """``hash_array`` canonical type JSON (spec Sections 6 and 9.4).
+
+    ``flags == 0`` keeps the historical serialization byte for byte. With any
+    option on, non-ASCII characters are written as raw UTF-8 (as serde_json does).
+    """
+    value = _sort_json_value(_data_type_to_value(data_type, bool(flags & _ORDERED_STRUCT_FIELDS)))
+    if flags == 0:
+        return json.dumps(value, separators=(",", ":"))
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Node-path rejection  (spec Section 9.6, any option on)
+# ---------------------------------------------------------------------------
+
+def _join(parent: str, name: str) -> str:
+    return f"{parent}{DELIMITER}{name}" if parent else name
+
+
+def _claim(seen: set[str], path: str) -> None:
+    if path in seen:
+        raise ValueError(
+            f"Ambiguous node path {path!r}: two schema nodes share one path "
+            "(duplicate names, or a name containing '/' that aliases another node); "
+            "rejected when any hashing option is on"
+        )
+    seen.add(path)
+
+
+def _walk_node_paths(data_type: pa.DataType, path: str, seen: set[str]) -> None:
+    import pyarrow as pa
+
+    t = data_type
+    while pa.types.is_dictionary(t):
+        t = t.value_type
+    if pa.types.is_struct(t):
+        for i in range(t.num_fields):
+            child = t.field(i)
+            child_path = _join(path, child.name)
+            _claim(seen, child_path)
+            _walk_node_paths(child.type, child_path, seen)
+    elif pa.types.is_map(t):
+        # The element of a map is its entries struct (key, value).
+        element_path = f"{path}{DELIMITER}"
+        _claim(seen, element_path)
+        _walk_node_paths(pa.struct([t.key_field, t.item_field]), element_path, seen)
+    elif pa.types.is_list(t) or pa.types.is_large_list(t) or pa.types.is_fixed_size_list(t):
+        element_path = f"{path}{DELIMITER}"
+        _claim(seen, element_path)
+        _walk_node_paths(t.value_field.type, element_path, seen)
+
+
+def _check_schema_node_paths(schema: pa.Schema) -> None:
+    """Raise ``ValueError`` if two nodes of ``schema`` share a node path (spec 9.6)."""
+    seen: set[str] = set()
+    for i in range(len(schema)):
+        field = schema.field(i)
+        _claim(seen, field.name)
+        _walk_node_paths(field.type, field.name, seen)
+
+
+def _check_type_node_paths(data_type: pa.DataType) -> None:
+    """Raise ``ValueError`` if two nodes of an array type share a node path (spec 9.6)."""
+    seen: set[str] = set()
+    _claim(seen, "")
+    _walk_node_paths(data_type, "", seen)
 
 
 # ---------------------------------------------------------------------------
@@ -300,9 +419,32 @@ def _update_metadata_hash(hasher: _Hasher, schema: pa.Schema) -> None:
         hasher.update(json.dumps(meta_doc, separators=(",", ":"), ensure_ascii=False).encode())
 
 
-def _hash_schema(schema: pa.Schema, include_metadata: bool = False) -> bytes:
+class _BytesCollector:
+    """A ``_Hasher`` that records its input (used to compare Phase 2 documents)."""
+
+    def __init__(self) -> None:
+        self.data = bytearray()
+
+    def update(self, data: bytes | bytearray, /) -> None:
+        self.data += data
+
+
+def _schema_key(schema: pa.Schema, include_metadata: bool, flags: int) -> tuple[str, bytes]:
+    """Everything a schema contributes to the schema digest (spec 9.7 check key)."""
+    phase2 = _BytesCollector()
+    if include_metadata:
+        _update_metadata_hash(phase2, schema)
+    return _phase1_json(schema, flags), bytes(phase2.data)
+
+
+def _hash_schema(schema: pa.Schema, include_metadata: bool = False, flags: int = 0) -> bytes:
     h = hashlib.sha256()
-    h.update(_serialized_schema(schema).encode())
+    if flags:
+        # Spec Section 9.2: tag, Phase 1 under flags, then Phase 2 unchanged.
+        h.update(_options_tag(flags))
+        h.update(_phase1_json(schema, flags).encode())
+    else:
+        h.update(_serialized_schema(schema).encode())
     if include_metadata:
         _update_metadata_hash(h, schema)
     return h.digest()
@@ -346,6 +488,7 @@ def _extract_type_entries(
     nullable: bool,
     path: str,
     out: dict[str, tuple],
+    nested_validity: bool = False,
 ) -> None:
     """Recursively decompose a data type into BTreeMap entries.
 
@@ -353,22 +496,34 @@ def _extract_type_entries(
     - Structs are transparent — no entry, recurse into sorted children
     - Lists create validity-only + structural/data entries
     - Leaves create data entries
+
+    With ``nested_validity`` (spec Section 9.5) a nullable struct gets a
+    validity-only entry, and a nullable struct or list that is a list element
+    records its validity in the list's element entry (``reuse``) instead of
+    replacing it.
     """
     import pyarrow as pa
     canonical = _normalize_data_type(data_type)
+    nv = nested_validity
+    # True only for a nullable list element: the list has just created its
+    # element entry at `path` (spec Section 9.5).
+    reuse = nv and nullable and path in out
 
     if pa.types.is_struct(canonical):
-        # Struct is transparent — no entry for the struct itself.
+        # Struct is transparent — no entry for the struct itself (default).
+        if nv and nullable and not reuse:
+            out[path] = _new_validity_only()
         # Recurse into children sorted alphabetically (spec Section 3.5).
         children = [canonical.field(i) for i in range(canonical.num_fields)]
         children.sort(key=lambda f: f.name)
         for child in children:
             child_path = f"{path}{DELIMITER}{child.name}" if path else child.name
-            _extract_type_entries(child.type, child.nullable, child_path, out)
+            _extract_type_entries(child.type, child.nullable, child_path, out, nv)
 
     elif pa.types.is_large_list(canonical) or pa.types.is_list(canonical):
-        # Nullable list: validity-only entry at `path` (spec Section 3.4)
-        if nullable:
+        # Nullable list: validity-only entry at `path` (spec Section 3.4).
+        # Default: this REPLACES an existing list-element entry.
+        if nullable and not reuse:
             out[path] = _new_validity_only()
 
         # List level: entry at path + "/" (spec Section 3.4)
@@ -379,11 +534,11 @@ def _extract_type_entries(
         if pa.types.is_struct(inner_canonical):
             # List<Struct>: structural-only at list_path, struct children get own entries
             out[list_path] = _new_structural_only(inner_field.nullable)
-            _extract_type_entries(inner_field.type, inner_field.nullable, list_path, out)
+            _extract_type_entries(inner_field.type, inner_field.nullable, list_path, out, nv)
         elif pa.types.is_large_list(inner_canonical) or pa.types.is_list(inner_canonical):
             # List<List>: structural-only, recurse into inner list
             out[list_path] = _new_structural_only(inner_field.nullable)
-            _extract_type_entries(inner_field.type, inner_field.nullable, list_path, out)
+            _extract_type_entries(inner_field.type, inner_field.nullable, list_path, out, nv)
         else:
             # List<Leaf>: list-leaf entry with both structural + data
             out[list_path] = _new_list_leaf(inner_field.nullable)
@@ -393,10 +548,12 @@ def _extract_type_entries(
         out[path] = _new_data_only(nullable)
 
 
-def _extract_fields(field: pa.Field, parent: str, out: dict[str, tuple]) -> None:
+def _extract_fields(
+    field: pa.Field, parent: str, out: dict[str, tuple], nested_validity: bool = False
+) -> None:
     """Extract BTreeMap entries from a schema field (record-batch path)."""
     full_name = f"{parent}{DELIMITER}{field.name}" if parent else field.name
-    _extract_type_entries(field.type, field.nullable, full_name, out)
+    _extract_type_entries(field.type, field.nullable, full_name, out, nested_validity)
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +639,7 @@ def _get_validity_list(array):
     return [array[i].is_valid for i in range(len(array))]
 
 
-def _traverse_and_update(data_type, nullable, array, path, ancestor_nulls, fields):
+def _traverse_and_update(data_type, nullable, array, path, ancestor_nulls, fields, nested_validity=False):
     """Top-down recursive traversal that routes data to BTreeMap entries.
 
     Parameters:
@@ -492,6 +649,7 @@ def _traverse_and_update(data_type, nullable, array, path, ancestor_nulls, field
         path: current BTreeMap key path
         ancestor_nulls: list of bools from ancestor struct nulls, or None
         fields: the BTreeMap of entries to populate
+        nested_validity: spec Section 9.5 (nullable structs record their validity)
     """
     import pyarrow as pa
 
@@ -499,14 +657,16 @@ def _traverse_and_update(data_type, nullable, array, path, ancestor_nulls, field
     canonical = _normalize_data_type(effective_type)
 
     if pa.types.is_large_list(canonical):
-        _traverse_list(effective_array, canonical.value_field, nullable, path, ancestor_nulls, fields)
+        _traverse_list(
+            effective_array, canonical.value_field, nullable, path, ancestor_nulls, fields, nested_validity
+        )
     elif pa.types.is_struct(canonical):
-        _traverse_struct(effective_array, nullable, path, ancestor_nulls, fields)
+        _traverse_struct(effective_array, nullable, path, ancestor_nulls, fields, nested_validity)
     else:
         _traverse_leaf(effective_type, effective_array, path, ancestor_nulls, fields)
 
 
-def _traverse_list(array, value_field, nullable, path, ancestor_nulls, fields):
+def _traverse_list(array, value_field, nullable, path, ancestor_nulls, fields, nested_validity=False):
     """Traverse a list array, populating validity/structural/data entries (spec Section 3.4)."""
     import pyarrow as pa
 
@@ -553,13 +713,16 @@ def _traverse_list(array, value_field, nullable, path, ancestor_nulls, fields):
                 list_path,
                 None,  # list elements don't inherit ancestor struct nulls
                 fields,
+                nested_validity,
             )
 
 
-def _traverse_struct(array, nullable, path, ancestor_nulls, fields):
+def _traverse_struct(array, nullable, path, ancestor_nulls, fields, nested_validity=False):
     """Traverse a struct array — struct is transparent (spec Section 3.5).
 
-    Struct-level nulls are AND-propagated to all descendant entries.
+    Struct-level nulls are AND-propagated to all descendant entries. With
+    ``nested_validity`` a nullable struct also pushes that combined validity
+    into its own entry's null bits (spec Section 9.5).
     """
     import pyarrow as pa
 
@@ -569,6 +732,15 @@ def _traverse_struct(array, nullable, path, ancestor_nulls, fields):
         combined = _combine_null_masks(_get_validity_list(struct_array), ancestor_nulls)
     else:
         combined = ancestor_nulls
+
+    if nested_validity and nullable:
+        entry = fields.get(path)
+        if entry is not None and entry[0] is not None:
+            if combined is not None:
+                for v in combined:
+                    entry[0].push(v)
+            else:
+                entry[0].extend_true(len(struct_array))
 
     # Sort children alphabetically by field name
     children = [(i, struct_array.type.field(i)) for i in range(struct_array.type.num_fields)]
@@ -584,6 +756,7 @@ def _traverse_struct(array, nullable, path, ancestor_nulls, fields):
             child_path,
             combined,
             fields,
+            nested_validity,
         )
 
 
@@ -769,9 +942,21 @@ class ArrowDigester:
     them — see the ``include_metadata`` parameter on each method.
     A schema with no metadata produces the same hash regardless of that
     flag (empty-metadata invariant).
+
+    Three further keyword-only options, all off by default, are described in
+    spec Section 9: ``ordered_columns``, ``ordered_struct_fields`` and
+    ``nested_validity``. With all three off every hash is exactly as before.
     """
 
-    def __init__(self, schema: pa.Schema, *, include_metadata: bool = False) -> None:
+    def __init__(
+        self,
+        schema: pa.Schema,
+        *,
+        include_metadata: bool = False,
+        ordered_columns: bool = False,
+        ordered_struct_fields: bool = False,
+        nested_validity: bool = False,
+    ) -> None:
         """Initialize a streaming Arrow hasher.
 
         Args:
@@ -781,21 +966,60 @@ class ArrowDigester:
                 preserving hash format 0.0.1 stability. A schema with no
                 metadata produces the same hash regardless of this flag
                 (empty-metadata invariant).
+            ordered_columns: When True, the order of the top-level columns is
+                part of the hash (spec Section 9.3).
+            ordered_struct_fields: When True, the order of struct fields, at
+                every nesting depth, is part of the hash (spec Section 9.3).
+            nested_validity: When True, every nullable struct, and every
+                nullable list or struct that is a list element, records its
+                own validity bits (spec Section 9.5).
+
+        With any of these three options on, the hash never equals the hash
+        taken with a different set of options (in particular with all of them
+        off), and schemas in which two nodes share a path (duplicate names, or
+        a name containing ``/`` that aliases another node) are rejected with
+        ``ValueError`` (spec Section 9.6).
+
+        With any option on, every batch passed to :meth:`update` must have the
+        same canonical schema as ``schema`` under those options, otherwise
+        ``ValueError`` is raised (spec Section 9.7). For example, with
+        ``ordered_columns`` a batch with the columns in a different order is
+        rejected.
+
+        Raises:
+            ValueError: With any option on, if ``schema`` is rejected (spec 9.6).
         """
+        flags = _flags(ordered_columns, ordered_struct_fields, nested_validity)
+        if flags:
+            _check_schema_node_paths(schema)
         self._schema = schema
-        self._include_metadata = include_metadata  # captured in _schema_digest; stored for repr/diagnostics
-        self._schema_digest = _hash_schema(schema, include_metadata=include_metadata)
+        self._include_metadata = include_metadata  # captured in _schema_digest; reused by update()
+        self._flags = flags
+        self._schema_digest = _hash_schema(schema, include_metadata=include_metadata, flags=flags)
+        # Spec Section 9.7: with any option on, every batch must match this key.
+        self._schema_key = _schema_key(schema, include_metadata, flags) if flags else None
         # BTreeMap<path, (BitVec|None, sha256|None, sha256|None)> — sorted by key
         self._fields: dict[str, tuple] = {}
+        nv = bool(flags & _NESTED_VALIDITY)
         for i in range(len(schema)):
-            _extract_fields(schema.field(i), "", self._fields)
+            _extract_fields(schema.field(i), "", self._fields, nv)
         # Ensure sorted order (Python 3.7+ dicts are insertion-ordered)
         self._fields = dict(sorted(self._fields.items()))
 
     def update(self, record_batch: pa.RecordBatch) -> None:
-        """Feed a RecordBatch into the running digest (spec Sections 3–5)."""
-        # Build a mapping from top-level column name to (field, array)
+        """Feed a RecordBatch into the running digest (spec Sections 3–5).
+
+        Raises:
+            ValueError: With any option on, if the batch's schema is rejected
+                (spec 9.6) or does not match the digester's schema under its
+                options (spec 9.7).
+        """
         schema = record_batch.schema
+        if self._flags:
+            _check_schema_node_paths(schema)
+            if _schema_key(schema, self._include_metadata, self._flags) != self._schema_key:
+                raise ValueError(_SCHEMA_MISMATCH)
+        nv = bool(self._flags & _NESTED_VALIDITY)
         # Traverse each top-level field using the recursive traversal
         for i in range(len(schema)):
             field = schema.field(i)
@@ -807,6 +1031,7 @@ class ArrowDigester:
                 field.name,
                 None,  # no ancestor struct nulls at top level
                 self._fields,
+                nv,
             )
 
     def finalize(self) -> bytes:
@@ -820,7 +1045,14 @@ class ArrowDigester:
     # -- Convenience class methods ------------------------------------------
 
     @staticmethod
-    def hash_schema(schema: pa.Schema, *, include_metadata: bool = False) -> bytes:
+    def hash_schema(
+        schema: pa.Schema,
+        *,
+        include_metadata: bool = False,
+        ordered_columns: bool = False,
+        ordered_struct_fields: bool = False,
+        nested_validity: bool = False,
+    ) -> bytes:
         """Hash an Arrow schema.
 
         Args:
@@ -830,11 +1062,39 @@ class ArrowDigester:
                 preserving hash format 0.0.1 stability. A schema with no
                 metadata produces the same hash regardless of this flag
                 (empty-metadata invariant).
+            ordered_columns: When True, the order of the top-level columns is
+                part of the hash (spec Section 9.3).
+            ordered_struct_fields: When True, the order of struct fields, at
+                every nesting depth, is part of the hash (spec Section 9.3).
+            nested_validity: When True, every nullable struct, and every
+                nullable list or struct that is a list element, records its
+                own validity bits (spec Section 9.5).
+
+        With any of these three options on, the hash never equals the hash
+        taken with a different set of options (in particular with all of them
+        off), and schemas in which two nodes share a path (duplicate names, or
+        a name containing ``/`` that aliases another node) are rejected with
+        ``ValueError`` (spec Section 9.6).
+        ``nested_validity`` does not change the schema JSON, but like every
+        option it is part of the hash.
+
+        Raises:
+            ValueError: With any option on, if ``schema`` is rejected (spec 9.6).
         """
-        return VERSION_BYTES + _hash_schema(schema, include_metadata=include_metadata)
+        flags = _flags(ordered_columns, ordered_struct_fields, nested_validity)
+        if flags:
+            _check_schema_node_paths(schema)
+        return VERSION_BYTES + _hash_schema(schema, include_metadata=include_metadata, flags=flags)
 
     @staticmethod
-    def hash_record_batch(record_batch: pa.RecordBatch, *, include_metadata: bool = False) -> bytes:
+    def hash_record_batch(
+        record_batch: pa.RecordBatch,
+        *,
+        include_metadata: bool = False,
+        ordered_columns: bool = False,
+        ordered_struct_fields: bool = False,
+        nested_validity: bool = False,
+    ) -> bytes:
         """Hash an Arrow record batch.
 
         Args:
@@ -844,14 +1104,45 @@ class ArrowDigester:
                 preserving hash format 0.0.1 stability. A schema with no
                 metadata produces the same hash regardless of this flag
                 (empty-metadata invariant).
+            ordered_columns: When True, the order of the top-level columns is
+                part of the hash (spec Section 9.3).
+            ordered_struct_fields: When True, the order of struct fields, at
+                every nesting depth, is part of the hash (spec Section 9.3).
+            nested_validity: When True, every nullable struct, and every
+                nullable list or struct that is a list element, records its
+                own validity bits (spec Section 9.5).
+
+        With any of these three options on, the hash never equals the hash
+        taken with a different set of options (in particular with all of them
+        off), and schemas in which two nodes share a path (duplicate names, or
+        a name containing ``/`` that aliases another node) are rejected with
+        ``ValueError`` (spec Section 9.6).
+        Raises:
+            ValueError: With any option on, if the schema is rejected (spec 9.6).
         """
-        d = ArrowDigester(record_batch.schema, include_metadata=include_metadata)
+        d = ArrowDigester(
+            record_batch.schema,
+            include_metadata=include_metadata,
+            ordered_columns=ordered_columns,
+            ordered_struct_fields=ordered_struct_fields,
+            nested_validity=nested_validity,
+        )
         d.update(record_batch)
         return d.finalize()
 
     @staticmethod
-    def hash_table(table: pa.Table, *, include_metadata: bool = False) -> bytes:
+    def hash_table(
+        table: pa.Table,
+        *,
+        include_metadata: bool = False,
+        ordered_columns: bool = False,
+        ordered_struct_fields: bool = False,
+        nested_validity: bool = False,
+    ) -> bytes:
         """Hash a full Arrow table (iterates over all batches).
+
+        Equivalent to ``ArrowDigester(table.schema, ...)``, :meth:`update` for each
+        batch of ``table.to_batches()``, then :meth:`finalize`.
 
         Args:
             table: The table to hash.
@@ -860,23 +1151,75 @@ class ArrowDigester:
                 preserving hash format 0.0.1 stability. A schema with no
                 metadata produces the same hash regardless of this flag
                 (empty-metadata invariant).
+            ordered_columns: When True, the order of the top-level columns is
+                part of the hash (spec Section 9.3).
+            ordered_struct_fields: When True, the order of struct fields, at
+                every nesting depth, is part of the hash (spec Section 9.3).
+            nested_validity: When True, every nullable struct, and every
+                nullable list or struct that is a list element, records its
+                own validity bits (spec Section 9.5).
+
+        With any of these three options on, the hash never equals the hash
+        taken with a different set of options (in particular with all of them
+        off), and schemas in which two nodes share a path (duplicate names, or
+        a name containing ``/`` that aliases another node) are rejected with
+        ``ValueError`` (spec Section 9.6).
+        Raises:
+            ValueError: With any option on, if the schema is rejected (spec 9.6).
         """
-        d = ArrowDigester(table.schema, include_metadata=include_metadata)
+        d = ArrowDigester(
+            table.schema,
+            include_metadata=include_metadata,
+            ordered_columns=ordered_columns,
+            ordered_struct_fields=ordered_struct_fields,
+            nested_validity=nested_validity,
+        )
         for batch in table.to_batches():
             d.update(batch)
         return d.finalize()
 
     @staticmethod
-    def hash_array(array: pa.Array) -> bytes:
+    def hash_array(
+        array: pa.Array,
+        *,
+        ordered_columns: bool = False,
+        ordered_struct_fields: bool = False,
+        nested_validity: bool = False,
+    ) -> bytes:
         """Hash a single array (spec Section 6).
 
         Uses the same recursive BTreeMap decomposition as the record-batch path.
+
+        Args:
+            array: The array to hash.
+            ordered_columns: When True, the order of the top-level columns is
+                part of the hash (spec Section 9.3).
+            ordered_struct_fields: When True, the order of struct fields, at
+                every nesting depth, is part of the hash (spec Section 9.3).
+            nested_validity: When True, every nullable struct, and every
+                nullable list or struct that is a list element, records its
+                own validity bits (spec Section 9.5).
+
+        With any of these three options on, the hash never equals the hash
+        taken with a different set of options (in particular with all of them
+        off), and schemas in which two nodes share a path (duplicate names, or
+        a name containing ``/`` that aliases another node) are rejected with
+        ``ValueError`` (spec Section 9.6).
+        ``ordered_columns`` does not change the type JSON of an array, but like
+        every option it is part of the hash (spec Section 9.4).
+
+        Raises:
+            ValueError: With any option on, if the array's type is rejected
+                (spec 9.6).
 
         Note:
             ``include_metadata`` is intentionally absent here — standalone arrays
             carry no schema or field metadata. This matches the Rust ``starfix`` API.
         """
         import pyarrow as pa
+
+        flags = _flags(ordered_columns, ordered_struct_fields, nested_validity)
+        nv = bool(flags & _NESTED_VALIDITY)
 
         # Resolve dictionary arrays to their plain value type
         effective_type = array.type
@@ -885,23 +1228,26 @@ class ArrowDigester:
             effective_type = effective_type.value_type
             effective_array = array.cast(effective_type)
 
+        if flags:
+            _check_type_node_paths(effective_type)
+
         # Normalize to canonical large types
         normalized_type = _normalize_data_type(effective_type)
 
-        # Step 1: Type metadata (canonical JSON string)
-        dt_value = _data_type_to_value(normalized_type)
-        dt_value = _sort_json_value(dt_value)
-        dt_json = json.dumps(dt_value, separators=(",", ":"))
-
         final_digest = hashlib.sha256()
-        final_digest.update(dt_json.encode())
+        if flags:
+            # Spec Section 9.2: the options tag is the first input.
+            final_digest.update(_options_tag(flags))
+
+        # Step 1: Type metadata (canonical JSON string)
+        final_digest.update(_type_json(normalized_type, flags).encode())
 
         # Determine nullability: arrays with null_count > 0 are nullable
         nullable = effective_array.null_count > 0
 
         # Step 2: Build BTreeMap entries from the type tree (same as record-batch)
         fields: dict[str, tuple] = {}
-        _extract_type_entries(effective_type, nullable, "", fields)
+        _extract_type_entries(effective_type, nullable, "", fields, nv)
         fields = dict(sorted(fields.items()))
 
         # Step 3: Traverse and populate entries
@@ -912,6 +1258,7 @@ class ArrowDigester:
             "",
             None,
             fields,
+            nv,
         )
 
         # Step 4: Finalize all entries into the digest
@@ -919,3 +1266,4 @@ class ArrowDigester:
             _finalize_digest(final_digest, entry)
 
         return VERSION_BYTES + final_digest.digest()
+
