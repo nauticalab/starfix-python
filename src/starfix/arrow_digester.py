@@ -98,35 +98,40 @@ class _BitVec:
 # Schema / DataType serialization  (spec Section 2)
 # ---------------------------------------------------------------------------
 
-def _data_type_to_value(dt: pa.DataType, ordered_struct_fields: bool = False) -> object:
+def _data_type_to_value(dt: pa.DataType, flags: int = 0) -> object:
     """Convert a pyarrow DataType to the JSON-compatible value that matches
     the canonical form described in spec Section 2.1.
 
     Types are normalized: Utf8→LargeUtf8, Binary→LargeBinary, List→LargeList,
     Dictionary→value_type. Struct fields are sorted alphabetically, or kept in
-    declaration order when ``ordered_struct_fields`` is set (spec Section 9.3),
-    at every depth.
+    declaration order when ``flags`` has ``ordered_struct_fields`` (spec
+    Section 9.3), at every depth. ``flags == 0`` is the historical form.
     """
     import pyarrow as pa
 
-    osf = ordered_struct_fields
     # Normalize: Dictionary → recurse on value type
     if pa.types.is_dictionary(dt):
-        return _data_type_to_value(dt.value_type, osf)
+        return _data_type_to_value(dt.value_type, flags)
 
     if pa.types.is_struct(dt):
         fields = [dt.field(i) for i in range(dt.num_fields)]
-        if not osf:
+        if not flags & _ORDERED_STRUCT_FIELDS:
             # Sort struct fields alphabetically by name
             fields.sort(key=lambda f: f.name)
-        fields_json = [_inner_field_to_value(f, osf) for f in fields]
+        fields_json = [_inner_field_to_value(f, flags) for f in fields]
         return {"Struct": fields_json}
     if pa.types.is_list(dt) or pa.types.is_large_list(dt):
-        return {"LargeList": _element_type_to_value(dt.value_field, osf)}
+        return {"LargeList": _element_type_to_value(dt.value_field, flags)}
     if pa.types.is_fixed_size_list(dt):
-        return {"FixedSizeList": [_element_type_to_value(dt.value_field, osf), dt.list_size]}
+        return {"FixedSizeList": [_element_type_to_value(dt.value_field, flags), dt.list_size]}
     if pa.types.is_map(dt):
-        return {"Map": [_inner_field_to_value(dt.key_field.with_name("entries"), osf), False]}
+        if flags:
+            # The entries field (a struct of key and value) and keys_sorted,
+            # as the Rust implementation serializes DataType::Map(entries, sorted).
+            return {"Map": [_inner_field_to_value(dt.field(0), flags), dt.keys_sorted]}
+        # Historical form (flags == 0), kept byte for byte: it omits the value
+        # type and does not match the Rust form (see tests/test_known_divergences.py).
+        return {"Map": [_inner_field_to_value(dt.key_field.with_name("entries")), False]}
 
     # Primitive / leaf types – must match Arrow-Rust serde
     return _primitive_data_type_string(dt)
@@ -193,22 +198,22 @@ def _primitive_data_type_string(dt: pa.DataType) -> object:
     raise NotImplementedError(f"Unsupported data type: {dt}")
 
 
-def _inner_field_to_value(field: pa.Field, ordered_struct_fields: bool = False) -> dict:
+def _inner_field_to_value(field: pa.Field, flags: int = 0) -> dict:
     """Convert a field to JSON with name, data_type, and nullable."""
     return {
         "name": field.name,
-        "data_type": _data_type_to_value(field.type, ordered_struct_fields),
+        "data_type": _data_type_to_value(field.type, flags),
         "nullable": field.nullable,
     }
 
 
-def _element_type_to_value(field: pa.Field, ordered_struct_fields: bool = False) -> dict:
+def _element_type_to_value(field: pa.Field, flags: int = 0) -> dict:
     """Convert a container element field to JSON with only data_type and nullable (no name).
 
     Used for list and fixed-size list element types, matching Rust ``element_type_to_value``.
     """
     return {
-        "data_type": _data_type_to_value(field.type, ordered_struct_fields),
+        "data_type": _data_type_to_value(field.type, flags),
         "nullable": field.nullable,
     }
 
@@ -243,15 +248,14 @@ def _phase1_json(schema: pa.Schema, flags: int) -> str:
     """
     if flags == 0:
         return _serialized_schema(schema)
-    osf = bool(flags & _ORDERED_STRUCT_FIELDS)
     fields = [schema.field(i) for i in range(len(schema))]
     if flags & _ORDERED_COLUMNS:
         # Top level is an array of struct-child-form objects, in schema order.
-        doc: object = [_sort_json_value(_inner_field_to_value(f, osf)) for f in fields]
+        doc: object = [_sort_json_value(_inner_field_to_value(f, flags)) for f in fields]
     else:
         doc = OrderedDict(sorted(
             (f.name, _sort_json_value({
-                "data_type": _data_type_to_value(f.type, osf),
+                "data_type": _data_type_to_value(f.type, flags),
                 "nullable": f.nullable,
             }))
             for f in fields
@@ -265,7 +269,7 @@ def _type_json(data_type: pa.DataType, flags: int) -> str:
     ``flags == 0`` keeps the historical serialization byte for byte. With any
     option on, non-ASCII characters are written as raw UTF-8 (as serde_json does).
     """
-    value = _sort_json_value(_data_type_to_value(data_type, bool(flags & _ORDERED_STRUCT_FIELDS)))
+    value = _sort_json_value(_data_type_to_value(data_type, flags))
     if flags == 0:
         return json.dumps(value, separators=(",", ":"))
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
@@ -305,7 +309,7 @@ def _walk_node_paths(data_type: pa.DataType, path: str, seen: set[str]) -> None:
         # The element of a map is its entries struct (key, value).
         element_path = f"{path}{DELIMITER}"
         _claim(seen, element_path)
-        _walk_node_paths(pa.struct([t.key_field, t.item_field]), element_path, seen)
+        _walk_node_paths(t.field(0).type, element_path, seen)
     elif pa.types.is_list(t) or pa.types.is_large_list(t) or pa.types.is_fixed_size_list(t):
         element_path = f"{path}{DELIMITER}"
         _claim(seen, element_path)
@@ -663,7 +667,7 @@ def _traverse_and_update(data_type, nullable, array, path, ancestor_nulls, field
     elif pa.types.is_struct(canonical):
         _traverse_struct(effective_array, nullable, path, ancestor_nulls, fields, nested_validity)
     else:
-        _traverse_leaf(effective_type, effective_array, path, ancestor_nulls, fields)
+        _traverse_leaf(effective_type, effective_array, path, ancestor_nulls, fields, nested_validity)
 
 
 def _traverse_list(array, value_field, nullable, path, ancestor_nulls, fields, nested_validity=False):
@@ -760,7 +764,7 @@ def _traverse_struct(array, nullable, path, ancestor_nulls, fields, nested_valid
         )
 
 
-def _traverse_leaf(data_type, array, path, ancestor_nulls, fields):
+def _traverse_leaf(data_type, array, path, ancestor_nulls, fields, nested_validity=False):
     """Traverse a leaf array — hash data into its BTreeMap entry (spec Sections 3.1–3.3)."""
     entry = fields.get(path)
     if entry is None:
@@ -783,15 +787,18 @@ def _traverse_leaf(data_type, array, path, ancestor_nulls, fields):
             null_bits.extend_true(len(array))
 
     # Hash leaf data, skipping null elements
-    _hash_leaf_data(data_type, array, data_digest, effective)
+    _hash_leaf_data(data_type, array, data_digest, effective, nested_validity)
 
 
-def _hash_leaf_data(data_type, array, data_digest, effective_nulls):
-    """Hash leaf-level data bytes into the data digest (spec Sections 3.1–3.3)."""
+def _hash_leaf_data(data_type, array, data_digest, effective_nulls, nested_validity=False):
+    """Hash leaf-level data bytes into the data digest (spec Sections 3.1–3.3, 9.5.1)."""
     import pyarrow as pa
 
     if pa.types.is_boolean(data_type):
-        _hash_boolean_data(array, data_digest, effective_nulls)
+        if nested_validity:
+            _hash_boolean_bytes(array, data_digest, effective_nulls)
+        else:
+            _hash_boolean_data(array, data_digest, effective_nulls)
     elif pa.types.is_large_binary(data_type):
         _hash_binary_data(array, data_digest, effective_nulls)
     elif pa.types.is_large_string(data_type):
@@ -872,6 +879,14 @@ def _hash_boolean_data(arr, data_digest, effective_nulls) -> None:
             if effective_nulls[i]:
                 bv.push(arr[i].as_py())
     data_digest.update(bv.raw_bytes())
+
+
+def _hash_boolean_bytes(arr, data_digest, effective_nulls) -> None:
+    """Hash boolean data as one byte (0x00/0x01) per valid value (spec Section 9.5.1)."""
+    values = arr.to_pylist() if effective_nulls is None else [
+        arr[i].as_py() for i in range(len(arr)) if effective_nulls[i]
+    ]
+    data_digest.update(bytes(1 if v else 0 for v in values))
 
 
 def _hash_binary_data(arr, data_digest, effective_nulls) -> None:

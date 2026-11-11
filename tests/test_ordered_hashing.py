@@ -167,6 +167,22 @@ class TestWorkedExamples:
         )
         assert ArrowDigester.hash_record_batch(batch, nested_validity=True) == expected
 
+    def test_t6_nested_validity_boolean_column(self):
+        schema = pa.schema([pa.field("b", pa.bool_(), nullable=True)])
+        batch = pa.record_batch([pa.array([True, None, False])], schema=schema)
+        schema_digest = sha(tag(0x04), b'{"b":{"data_type":"Boolean","nullable":true}}')
+        expected = V + sha(
+            schema_digest,
+            u64(3) + b"\x05",  # validity [1,0,1]
+            sha(b"\x01\x00"),  # one byte per VALID value: true, false
+        )
+        assert ArrowDigester.hash_record_batch(batch, nested_validity=True) == expected
+
+    def test_t6_nested_validity_boolean_hash_array(self):
+        arr = pa.array([True, False, True])
+        expected = V + sha(tag(0x04), b'"Boolean"', sha(b"\x01\x00\x01"))
+        assert ArrowDigester.hash_array(arr, nested_validity=True) == expected
+
 
 # ── Spec Section 9.3: Phase 1 JSON for every flags value ──────────────
 
@@ -416,7 +432,19 @@ def _nv_pairs():
         _batch({"c": pa.array([[None]], type=ls)}),
         _batch({"c": pa.array([[{"a": None}]], type=ls)}),
     )
-    return {"null_struct": p1, "vanishing_rows": p2, "list_of_nullable_list": p3, "list_of_nullable_struct": p4}
+    # 5. (9.5.1) non-nullable Boolean: padding bits look like false values
+    bt = pa.field("b", pa.bool_(), nullable=False)
+    p5 = (
+        pa.record_batch([pa.array([True])], schema=pa.schema([bt])),
+        pa.record_batch([pa.array([True, False, False])], schema=pa.schema([bt])),
+    )
+    return {
+        "null_struct": p1,
+        "vanishing_rows": p2,
+        "list_of_nullable_list": p3,
+        "list_of_nullable_struct": p4,
+        "boolean_padding": p5,
+    }
 
 
 class TestNestedValidity:
@@ -426,6 +454,36 @@ class TestNestedValidity:
         left, right = _nv_pairs()[case]
         equal = batch_hash(left, flags) == batch_hash(right, flags)
         assert equal == (not flags & 0x04)
+
+    @pytest.mark.parametrize("flags", ALL_FLAGS)
+    def test_boolean_padding_hash_array(self, flags):
+        one = ArrowDigester.hash_array(pa.array([True]), **opts(flags))
+        two = ArrowDigester.hash_array(pa.array([True, False]), **opts(flags))
+        assert (one == two) == (not flags & 0x04)
+
+    @pytest.mark.parametrize("flags", [f for f in ALL_FLAGS if f & 0x04])
+    def test_boolean_batch_split_and_slices(self, flags):
+        """Spec 9.5.1 / I8: Boolean leaves are split- and slice-independent with the third switch."""
+        st = pa.struct([pa.field("v", pa.bool_(), nullable=False)])
+        cols = {
+            "b": pa.array([True, False, None, True, True, False, True, False, True]),
+            "s": pa.array([{"v": i % 3 == 0} for i in range(9)], type=st),
+            "l": pa.array([[True], [False, True], None, [], [True, True, False], [False], [True], [], [False]]),
+        }
+        whole = _batch(cols, nullable=True)
+        ref = batch_hash(whole, flags)
+        d = ArrowDigester(whole.schema, **opts(flags))
+        for start, length in ((0, 3), (3, 1), (4, 5)):
+            d.update(whole.slice(start, length))
+        assert d.finalize() == ref
+        d = ArrowDigester(whole.schema, **opts(flags))
+        d.update(whole.slice(0, 0))
+        d.update(whole)
+        assert d.finalize() == ref
+        # non-zero offset slices of an array equal the same values built fresh
+        assert ArrowDigester.hash_array(cols["b"].slice(3, 5), **opts(flags)) == ArrowDigester.hash_array(
+            pa.array(cols["b"].slice(3, 5).to_pylist()), **opts(flags)
+        )
 
     def test_hash_array_nullable_struct_root_entry(self):
         """A nullable struct array passed to hash_array gets a validity-only entry at ""."""
