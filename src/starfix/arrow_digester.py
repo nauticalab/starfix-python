@@ -22,8 +22,32 @@ class _Hasher(Protocol):
     def update(self, data: bytes | bytearray, /) -> None: ...
 
 
+# Hash format version prefix. ITL-898 variant (b), pending the developer's decision:
+# bump to b"\x00\x00\x02" so that every hash taken with the fixed layout differs
+# from every v0.4.0 hash.
 VERSION_BYTES = b"\x00\x00\x01"
 DELIMITER = "/"
+
+# ---------------------------------------------------------------------------
+# Default-mode decisions pending for ITL-898. Each is one switch: flipping it to
+# True applies the Rust/spec behaviour with no options on (it is already applied
+# whenever an option is on). tests/test_known_divergences.py checks each flipped
+# switch against the Rust values, and pins the current default as strict xfails.
+# ---------------------------------------------------------------------------
+
+# Lossless layout (spec 9.5 / 9.5.1) in the default: developer ruling 2026-11-11
+# makes it the only layout once the regenerated Rust golden values land.
+_LOSSLESS_BY_DEFAULT = False
+# Map schema JSON: entries field (Struct[key, value]) and keys_sorted (spec 2.1).
+_FIX_DEFAULT_MAP_JSON = False
+# hash_array type JSON: non-ASCII written raw, as serde_json does (spec 2.1).
+_FIX_DEFAULT_TYPE_JSON_UTF8 = False
+# Null / Interval / Utf8View / BinaryView schema forms (spec 2.1), raising today.
+_FIX_DEFAULT_TYPE_FORMS = False
+# Phase 2 metadata paths of map fields: entries m/, key m//key, value m//value (2.2.1).
+_FIX_DEFAULT_MAP_METADATA_PATHS = False
+# Streaming: reject a batch whose schema differs from the digester's (spec 9.7).
+_FIX_DEFAULT_BATCH_CHECK = False
 
 # Hashing options (spec Section 9.1): keyword name -> bit of the flags byte.
 # This table is the single place that names the options; the keyword arguments of
@@ -51,6 +75,11 @@ def _flags(ordered_columns: bool, ordered_struct_fields: bool, nested_validity: 
         | (_ORDERED_STRUCT_FIELDS if ordered_struct_fields else 0)
         | (_NESTED_VALIDITY if nested_validity else 0)
     )
+
+
+def _lossless(flags: int) -> bool:
+    """Whether the lossless layout of spec 9.5 / 9.5.1 applies."""
+    return _LOSSLESS_BY_DEFAULT or bool(flags & _NESTED_VALIDITY)
 
 
 def _options_tag(flags: int) -> bytes:
@@ -125,7 +154,7 @@ def _data_type_to_value(dt: pa.DataType, flags: int = 0) -> object:
     if pa.types.is_fixed_size_list(dt):
         return {"FixedSizeList": [_element_type_to_value(dt.value_field, flags), dt.list_size]}
     if pa.types.is_map(dt):
-        if flags:
+        if flags or _FIX_DEFAULT_MAP_JSON:
             # The entries field (a struct of key and value) and keys_sorted,
             # as the Rust implementation serializes DataType::Map(entries, sorted).
             return {"Map": [_inner_field_to_value(dt.field(0), flags), dt.keys_sorted]}
@@ -207,7 +236,7 @@ def _primitive_data_type_string(dt: pa.DataType, flags: int = 0) -> object:
     if pa.types.is_fixed_size_binary(dt):
         return {"FixedSizeBinary": dt.byte_width}
 
-    if flags and str(dt) in _V05_ONLY_TYPE_FORMS:
+    if (flags or _FIX_DEFAULT_TYPE_FORMS) and str(dt) in _V05_ONLY_TYPE_FORMS:
         return _V05_ONLY_TYPE_FORMS[str(dt)]
 
     raise NotImplementedError(f"Unsupported data type: {dt}")
@@ -285,7 +314,7 @@ def _type_json(data_type: pa.DataType, flags: int) -> str:
     option on, non-ASCII characters are written as raw UTF-8 (as serde_json does).
     """
     value = _sort_json_value(_data_type_to_value(data_type, flags))
-    if flags == 0:
+    if flags == 0 and not _FIX_DEFAULT_TYPE_JSON_UTF8:
         return json.dumps(value, separators=(",", ":"))
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
@@ -405,7 +434,8 @@ def _collect_nested_field_metadata(
         result.update(_collect_nested_field_metadata(field.type.value_field, element_path, flags))
     elif pa.types.is_map(field.type):
         element_path = f"{path}{DELIMITER}"
-        element = field.type.field(0) if flags else field.type.item_field
+        rust_paths = flags or _FIX_DEFAULT_MAP_METADATA_PATHS
+        element = field.type.field(0) if rust_paths else field.type.item_field
         result.update(_collect_nested_field_metadata(element, element_path, flags))
 
     return dict(sorted(result.items()))
@@ -1046,10 +1076,12 @@ class ArrowDigester:
         self._flags = flags
         self._schema_digest = _hash_schema(schema, include_metadata=include_metadata, flags=flags)
         # Spec Section 9.7: with any option on, every batch must match this key.
-        self._schema_key = _schema_key(schema, include_metadata, flags) if flags else None
+        self._schema_key = (
+            _schema_key(schema, include_metadata, flags) if flags or _FIX_DEFAULT_BATCH_CHECK else None
+        )
         # BTreeMap<path, (BitVec|None, sha256|None, sha256|None)> — sorted by key
         self._fields: dict[str, tuple] = {}
-        nv = bool(flags & _NESTED_VALIDITY)
+        nv = _lossless(flags)
         for i in range(len(schema)):
             _extract_fields(schema.field(i), "", self._fields, nv)
         # Ensure sorted order (Python 3.7+ dicts are insertion-ordered)
@@ -1066,9 +1098,10 @@ class ArrowDigester:
         schema = record_batch.schema
         if self._flags:
             _check_schema_node_paths(schema)
+        if self._schema_key is not None:
             if _schema_key(schema, self._include_metadata, self._flags) != self._schema_key:
                 raise ValueError(_SCHEMA_MISMATCH)
-        nv = bool(self._flags & _NESTED_VALIDITY)
+        nv = _lossless(self._flags)
         # Traverse each top-level field using the recursive traversal
         for i in range(len(schema)):
             field = schema.field(i)
@@ -1268,7 +1301,7 @@ class ArrowDigester:
         import pyarrow as pa
 
         flags = _flags(ordered_columns, ordered_struct_fields, nested_validity)
-        nv = bool(flags & _NESTED_VALIDITY)
+        nv = _lossless(flags)
 
         # Resolve dictionary arrays to their plain value type
         effective_type = array.type

@@ -116,3 +116,69 @@ def test_default_update_rejects_metadata_mismatch_with_include_metadata() -> Non
     other = pa.schema([pa.field("a", pa.int32(), metadata={"k": "v"})])
     with pytest.raises(ValueError):
         d.update(pa.record_batch([pa.array([1], pa.int32())], schema=other))
+
+
+# ── Each pending default-mode fix is one switch: flipping it reproduces Rust ──
+
+
+def _schema_of(vector: dict) -> pa.Schema:
+    return pa.ipc.open_stream(io.BytesIO(base64.b64decode(vector["ipc_b64"]))).schema
+
+
+@pytest.mark.parametrize(
+    "switches, vector_ids",
+    [
+        (["_FIX_DEFAULT_MAP_JSON"], ["map_struct_ab_schema_f0", "map_struct_ba_schema_f0"]),
+        (
+            ["_FIX_DEFAULT_TYPE_FORMS"],
+            [
+                "type_null_schema_f0",
+                "type_interval_year_month_schema_f0",
+                "type_interval_day_time_schema_f0",
+                "type_interval_month_day_nano_schema_f0",
+                "type_utf8_view_schema_f0",
+                "type_binary_view_schema_f0",
+            ],
+        ),
+        (
+            # Map metadata vectors also carry a Map schema, so both map switches apply.
+            ["_FIX_DEFAULT_MAP_JSON", "_FIX_DEFAULT_MAP_METADATA_PATHS"],
+            ["meta_map_value_schema_f0_im1", "meta_map_key_schema_f0_im1"],
+        ),
+    ],
+)
+def test_flipping_switch_matches_rust_hash_schema(switches, vector_ids, monkeypatch) -> None:
+    import starfix.arrow_digester as ad
+
+    for name in switches:
+        monkeypatch.setattr(ad, name, True)
+    for vid in vector_ids:
+        vector = _golden_vector(vid)
+        got = ArrowDigester.hash_schema(_schema_of(vector), include_metadata=vector["include_metadata"])
+        assert got.hex() == vector["expected_hash"], vid
+
+
+def test_flipping_type_json_switch_matches_rust_hash_array(monkeypatch) -> None:
+    import starfix.arrow_digester as ad
+
+    monkeypatch.setattr(ad, "_FIX_DEFAULT_TYPE_JSON_UTF8", True)
+    for vid in ("names_array_struct_f0", "names_array_struct_int8_f0"):
+        vector = _golden_vector(vid)
+        batch = next(iter(pa.ipc.open_stream(io.BytesIO(base64.b64decode(vector["ipc_b64"])))))
+        assert ArrowDigester.hash_array(batch.column(0)).hex() == vector["expected_hash"], vid
+
+
+def test_flipping_batch_check_switch_rejects_mismatched_batches(monkeypatch) -> None:
+    import starfix.arrow_digester as ad
+
+    monkeypatch.setattr(ad, "_FIX_DEFAULT_BATCH_CHECK", True)
+    d = ArrowDigester(pa.schema([pa.field("a", pa.int32())]))
+    with pytest.raises(ValueError, match="does not match"):
+        d.update(pa.record_batch([pa.array([1], pa.int64())], names=["a"]))
+    d = ArrowDigester(pa.schema([pa.field("a", pa.int32())]), include_metadata=True)
+    other = pa.schema([pa.field("a", pa.int32(), metadata={"k": "v"})])
+    with pytest.raises(ValueError, match="does not match"):
+        d.update(pa.record_batch([pa.array([1], pa.int32())], schema=other))
+    # physically equivalent batches stay accepted
+    d = ArrowDigester(pa.schema([pa.field("s", pa.utf8())]))
+    d.update(pa.record_batch([pa.array(["x"], pa.large_utf8())], names=["s"]))
