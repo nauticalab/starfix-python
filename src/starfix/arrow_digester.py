@@ -25,6 +25,15 @@ class _Hasher(Protocol):
 VERSION_BYTES = b"\x00\x00\x01"
 DELIMITER = "/"
 
+# Hashing options (spec Section 9.1): keyword name -> bit of the flags byte.
+# This table is the single place that names the options; the keyword arguments of
+# the public API must use exactly these names.
+_OPTION_FLAGS: dict[str, int] = {
+    "ordered_columns": 0x01,
+    "ordered_struct_fields": 0x02,
+    "nested_validity": 0x04,
+}
+
 
 # ---------------------------------------------------------------------------
 # Bit-vector helper (LSB-first packing, matching bitvec<u8, Lsb0>)
