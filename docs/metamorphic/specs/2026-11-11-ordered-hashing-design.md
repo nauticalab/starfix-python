@@ -62,7 +62,7 @@ Rust behaviour as `xfail(strict=True)` tests; the four affected golden vectors
 | Input | Python today (flags 0) | Rust |
 |---|---|---|
 | `hash_schema` of a `Map` column | `{"Map":[{"data_type":<key type>,"name":"entries","nullable":false},false]}`: the value type and `keys_sorted` are ignored | `{"Map":[{"data_type":{"Struct":[key, value]},"name":"entries","nullable":false},keys_sorted]}` |
-| `hash_array` of a struct with a non-ASCII child name `é` | type JSON escapes it as the six ASCII characters `é` | raw UTF-8 (bytes `c3 a9`), spec 2.1 JSON text rules |
+| `hash_array` of a struct with a non-ASCII child name `é` | type JSON escapes it as the six ASCII characters `\u00e9` | raw UTF-8 (bytes `c3 a9`), spec 2.1 JSON text rules |
 | `update` with a batch whose schema differs (spec 9.7, no options) | accepted and hashed as given | rejected: Phase 1 JSON must match, plus the Phase 2 document with `include_metadata` |
 
 With any option on, Python matches Rust in all three cases.
