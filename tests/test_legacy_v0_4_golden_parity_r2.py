@@ -1,5 +1,7 @@
-"""[Legacy 0.4 mode] starfix-python v0.4.0 test, restored unchanged except for the import
-(starfix.legacy.v0_4). Its format-1 values pin the frozen legacy module byte for byte.
+"""[Legacy 0.4 mode] starfix-python v0.4.0 test, restored with its original format-1 values.
+Changes: the import (starfix.legacy.v0_4), and the _with_type / _record_batch helpers that build
+struct inputs with the schema's field types (pyarrow 19 cannot cast nullable struct children to
+non-nullable ones); same data. Its values pin the frozen legacy module byte for byte.
 
 Golden-hash parity tests — Round 2.
 

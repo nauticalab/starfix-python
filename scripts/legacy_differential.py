@@ -144,6 +144,8 @@ def _quirk_cases():
         return d.finalize()
 
     yield "stream_without_batch_check", unchecked_stream
+    # A zero-length fixed-width array with no values buffer: 0.4.0 raises AttributeError.
+    yield "fixed_width_without_values_buffer", lambda D: D.hash_array(pa.Array.from_buffers(pa.int32(), 0, [None, None]))
 
 
 def _cases(seeds: int):

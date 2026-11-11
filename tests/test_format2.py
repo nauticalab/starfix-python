@@ -806,3 +806,92 @@ def test_zero_width_fixed_size_binary_row_count_matters() -> None:
     assert f2.hash_record_batch(pa.record_batch([one], names=["z"])) != f2.hash_record_batch(
         pa.record_batch([five], names=["z"])
     )
+
+
+# ── Independent review of PR #9 (items 2, 3, 9, 14) ─────────────────────
+
+
+def test_empty_list_without_offsets_buffer_does_not_crash() -> None:
+    """Arrow allows an empty list array with no offsets buffer (it used to segfault)."""
+    import subprocess
+    import sys
+
+    code = """
+import pyarrow as pa
+from starfix import _format2 as f2
+for t in (pa.list_(pa.int32()), pa.large_list(pa.int32())):
+    arr = pa.Array.from_buffers(t, 0, [None, None], children=[pa.array([], pa.int32())])
+    arr.validate(full=True)
+    assert f2.hash_array(arr) == f2.hash_array(pa.array([], t))
+    s = pa.StructArray.from_arrays([arr], names=["l"])
+    assert f2.hash_array(s) == f2.hash_array(pa.StructArray.from_arrays([pa.array([], t)], names=["l"]))
+print("ok")
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0 and result.stdout.strip() == "ok", (result.returncode, result.stderr[-500:])
+
+
+@pytest.mark.parametrize("where", ["field", "schema", "struct_child"])
+def test_duplicate_metadata_keys_rejected_with_include_metadata(where) -> None:
+    dup = pa.KeyValueMetadata([(b"a", b"1"), (b"a", b"2")])
+    if where == "field":
+        schema = pa.schema([pa.field("x", pa.int8(), metadata=dup)])
+    elif where == "schema":
+        schema = pa.schema([pa.field("x", pa.int8())], metadata=dup)
+    else:
+        schema = pa.schema([pa.field("s", pa.struct([pa.field("c", pa.int8(), metadata=dup)]))])
+    f2.hash_schema(schema)  # metadata not hashed: accepted
+    with pytest.raises(ValueError, match="Duplicate metadata key 'a'"):
+        f2.hash_schema(schema, include_metadata=True)
+    with pytest.raises(ValueError, match="Duplicate metadata key"):
+        f2.Digester(schema, include_metadata=True)
+
+
+def test_explicit_extension_keys_conflicting_with_the_type_rejected(point_type) -> None:
+    conflicting = pa.schema([pa.field("p", point_type("km"), metadata={"ARROW:extension:name": "other"})])
+    with pytest.raises(ValueError, match="conflicting with its extension type"):
+        f2.hash_schema(conflicting, include_metadata=True)
+    agreeing = pa.schema([pa.field("p", point_type("km"), metadata={"ARROW:extension:name": "starfix.test.point"})])
+    assert f2.hash_schema(agreeing, include_metadata=True) == f2.hash_schema(
+        pa.schema([pa.field("p", point_type("km"))]), include_metadata=True
+    )
+
+
+def test_wrong_container_types_raise_type_error() -> None:
+    batch = pa.record_batch([pa.array([1, 2])], names=["a"])
+    table = pa.Table.from_batches([batch])
+    with pytest.raises(TypeError, match="hash_record_batch expects a pyarrow.RecordBatch"):
+        f2.hash_record_batch(table)
+    with pytest.raises(TypeError, match="hash_table expects a pyarrow.Table"):
+        f2.hash_table(batch)
+    with pytest.raises(TypeError, match="update expects a pyarrow.RecordBatch"):
+        f2.Digester(batch.schema).update(table)
+    with pytest.raises(TypeError, match="hash_schema expects a pyarrow.Schema"):
+        f2.hash_schema(batch)
+    with pytest.raises(TypeError, match="ArrowDigester expects a pyarrow.Schema"):
+        f2.Digester(batch)
+    with pytest.raises(TypeError, match="hash_array expects"):
+        f2.hash_array([1, 2])
+
+
+def test_hash_array_of_chunked_array_equals_combined_array() -> None:
+    chunked = pa.chunked_array([pa.array([1, None], pa.int32()), pa.array([], pa.int32()), pa.array([3], pa.int32())])
+    assert f2.hash_array(chunked) == f2.hash_array(chunked.combine_chunks())
+    nested = pa.chunked_array([pa.array([[True], None]), pa.array([[False, None]])])
+    assert f2.hash_array(nested) == f2.hash_array(nested.combine_chunks())
+
+
+def test_bits_restore_after_partial_appends() -> None:
+    """Snapshots restore exactly, whether the buffer ended mid-byte or on a byte boundary."""
+    from starfix._format2 import _Bits
+
+    for prefix in (0, 3, 8, 13):
+        bits = _Bits()
+        bits.append_true(prefix)
+        state = bits.snapshot()
+        bits.append_true(11)
+        bits.restore(state)
+        bits.append_true(2)
+        reference = _Bits()
+        reference.append_true(prefix + 2)
+        assert bits._len == reference._len and bytes(bits._bytes) == bytes(reference._bytes), prefix

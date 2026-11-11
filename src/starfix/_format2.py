@@ -223,12 +223,13 @@ def _extension_metadata(t: pa.DataType) -> dict[str, str]:
     return {"ARROW:extension:name": t.extension_name, "ARROW:extension:metadata": serialized.decode("utf-8")}
 
 
-def _exported_extension_metadata(t: pa.DataType) -> bytes:
-    """The serialized metadata pyarrow writes for an extension type (C data interface).
+def _exported_metadata_pairs(obj) -> list[tuple[bytes, bytes]]:
+    """Key/value pairs of a Field's, Schema's or DataType's metadata as Arrow exports them.
 
-    Exporting a field to the Arrow C data interface (a fixed, documented ABI) carries the
-    ARROW:extension:name / ARROW:extension:metadata keys in ArrowSchema.metadata, encoded
-    as int32 count, then per pair int32 length + key bytes, int32 length + value bytes.
+    Read through the Arrow C data interface (ArrowSchema.metadata, a fixed, documented ABI:
+    int32 count, then per pair int32 length + key bytes, int32 length + value bytes). Unlike
+    pyarrow's ``metadata`` dict this keeps duplicate keys, and for a registered extension
+    type it carries the ARROW:extension:* keys pyarrow writes for the type.
     """
     import ctypes
 
@@ -247,9 +248,9 @@ def _exported_extension_metadata(t: pa.DataType) -> bytes:
         ("private_data", ctypes.c_void_p),
     ]
     c_schema = _ArrowSchema()
-    pa.field("x", t)._export_to_c(ctypes.addressof(c_schema))
+    obj._export_to_c(ctypes.addressof(c_schema))
     try:
-        pairs: dict[bytes, bytes] = {}
+        pairs: list[tuple[bytes, bytes]] = []
         if c_schema.metadata:
             pos = c_schema.metadata
 
@@ -267,19 +268,45 @@ def _exported_extension_metadata(t: pa.DataType) -> bytes:
 
             for _ in range(read_int32()):
                 key = read_bytes(read_int32())
-                pairs[key] = read_bytes(read_int32())
-        return pairs.get(b"ARROW:extension:metadata", b"")
+                pairs.append((key, read_bytes(read_int32())))
+        return pairs
     finally:
         if c_schema.release:
             c_schema.release(ctypes.addressof(c_schema))
 
 
-def _field_metadata(field: pa.Field) -> dict[str, str]:
-    meta = _decode(field.metadata)
+def _exported_extension_metadata(t: pa.DataType) -> bytes:
+    """The serialized metadata pyarrow writes for a (natively registered) extension type."""
+    return dict(_exported_metadata_pairs(pa.field("x", t))).get(b"ARROW:extension:metadata", b"")
+
+
+def _unique_metadata(pairs: list[tuple[bytes, bytes]], where: str) -> dict[str, str]:
+    """Decode metadata pairs; Section 7: a duplicate key is ambiguous and rejected."""
+    out: dict[str, str] = {}
+    for key, value in pairs:
+        k = key.decode("utf-8")
+        if k in out:
+            raise ValueError(f"Duplicate metadata key {k!r} on {where}: ambiguous, rejected with include_metadata")
+        out[k] = value.decode("utf-8")
+    return out
+
+
+def _field_metadata(field: pa.Field, path: str) -> dict[str, str]:
+    """The field's metadata as stored (Section 2.3), duplicates rejected (Section 7)."""
+    explicit = _decode(field.metadata)  # pyarrow's dict view (duplicates collapsed)
     t = field.type
     while pa.types.is_dictionary(t):  # a dictionary of an extension type keeps its keys
         t = t.value_type
-    meta.update(_extension_metadata(t))
+    derived = _extension_metadata(t)
+    for key, value in derived.items():
+        if key in explicit and explicit[key] != value:
+            raise ValueError(
+                f"Field {path!r} carries {key}={explicit[key]!r}, conflicting with its extension type "
+                f"({value!r}): ambiguous, rejected with include_metadata"
+            )
+    meta = _unique_metadata(_exported_metadata_pairs(field), f"field {path!r}")
+    for key, value in derived.items():
+        meta.setdefault(key, value)
     # Section 2.3: an absent ARROW:extension:metadata is hashed as "" (absent == empty).
     if "ARROW:extension:name" in meta:
         meta.setdefault("ARROW:extension:metadata", "")
@@ -290,13 +317,13 @@ def phase2_json(schema: pa.Schema) -> str | None:
     """Section 2.3: metadata keyed by node path; None when there is none."""
     fields = {}
     for path, field in schema_nodes(schema):
-        meta = _field_metadata(field)
+        meta = _field_metadata(field, path)
         if meta:
             fields[path] = meta
     doc: dict[str, Any] = {}
     if fields:
         doc["fields"] = fields
-    schema_meta = _decode(schema.metadata)
+    schema_meta = _unique_metadata(_exported_metadata_pairs(schema), "the schema")
     if schema_meta:
         doc["schema"] = schema_meta
     return _json(doc) if doc else None
@@ -343,8 +370,12 @@ class _Bits:
             return
         shift = self._len & 7
         if shift:
-            value = (value << shift) | self._bytes.pop()
-        self._bytes += value.to_bytes((n + shift + 7) >> 3, "little")
+            # Replace the partial last byte and append in one slice assignment, so the
+            # buffer is never shorter than before (snapshot/restore relies on it).
+            value = (value << shift) | self._bytes[-1]
+            self._bytes[-1:] = value.to_bytes((n + shift + 7) >> 3, "little")
+        else:
+            self._bytes += value.to_bytes((n + 7) >> 3, "little")
         self._len += n
 
     def feed(self, digest) -> None:
@@ -357,9 +388,9 @@ class _Bits:
 
     def restore(self, state: tuple[int, int, int | None]) -> None:
         bit_len, byte_len, last = state
-        del self._bytes[byte_len:]
+        del self._bytes[byte_len:]  # appends only grow the buffer or rewrite its last byte
         if last is not None:
-            self._bytes[-1] = last
+            self._bytes[byte_len - 1] = last
         self._len = bit_len
 
 
@@ -619,6 +650,11 @@ def _visit(
 
     present = _and(bits, select)  # elements that are visited and valid (None: all)
     if entry.kind == "list":
+        if len(arr) == 0:
+            # An empty list array may legally have no offsets buffer: touch neither the
+            # offsets nor the lengths; the element node still gets visited (no elements).
+            _visit(arr.type.value_field, arr.values.slice(0, 0), path + "/", None, entries)
+            return
         lengths = arr.value_lengths()
         if present is not None:
             lengths = lengths.filter(present)
@@ -680,6 +716,7 @@ class Digester:
         ordered_columns: bool = False,
         ordered_struct_fields: bool = False,
     ) -> None:
+        _require(schema, pa.Schema, "ArrowDigester", "a pyarrow.Schema")
         self._flags = flags_of(ordered_columns, ordered_struct_fields)
         self._include_metadata = include_metadata
         self._schema_digest = schema_digest(schema, include_metadata, self._flags)
@@ -690,6 +727,7 @@ class Digester:
         self._rows = 0
 
     def update(self, batch: pa.RecordBatch) -> None:
+        _require(batch, pa.RecordBatch, "update", "a pyarrow.RecordBatch (use hash_table for a Table)")
         schema = batch.schema
         schema_nodes(schema)  # Section 7
         if schema_key(schema, self._include_metadata, self._flags) != self._key:
@@ -715,18 +753,26 @@ class Digester:
         return VERSION_BYTES + final.digest()
 
 
+def _require(obj, cls, entry_point: str, expected: str) -> None:
+    if not isinstance(obj, cls):
+        raise TypeError(f"{entry_point} expects {expected}, got {type(obj).__name__}")
+
+
 def hash_schema(schema: pa.Schema, *, include_metadata: bool = False, ordered_columns: bool = False,
                 ordered_struct_fields: bool = False) -> bytes:
+    _require(schema, pa.Schema, "hash_schema", "a pyarrow.Schema")
     return VERSION_BYTES + schema_digest(schema, include_metadata, flags_of(ordered_columns, ordered_struct_fields))
 
 
 def hash_record_batch(batch: pa.RecordBatch, **options: bool) -> bytes:
+    _require(batch, pa.RecordBatch, "hash_record_batch", "a pyarrow.RecordBatch (use hash_table for a Table)")
     d = Digester(batch.schema, **options)
     d.update(batch)
     return d.finalize()
 
 
 def hash_table(table: pa.Table, **options: bool) -> bytes:
+    _require(table, pa.Table, "hash_table", "a pyarrow.Table (use hash_record_batch for a RecordBatch)")
     d = Digester(table.schema, **options)
     for batch in table.to_batches():
         d.update(batch)
@@ -739,12 +785,15 @@ def hash_array(array: pa.Array, *, ordered_columns: bool = False, ordered_struct
     Its validity is always written: the logical validity after decoding dictionaries (a
     valid dictionary key that points at a null dictionary value is a null).
     """
+    _require(array, (pa.Array, pa.ChunkedArray), "hash_array", "a pyarrow.Array or pyarrow.ChunkedArray")
     flags = flags_of(ordered_columns, ordered_struct_fields)
     root = pa.field("", array.type, nullable=True)
     nodes = _walk([("", root)])
     _check_data_supported(nodes)
     entries = _new_entries(nodes)
-    _visit(root, array, "", None, entries)
+    # A ChunkedArray hashes like its chunks combined: entries are streams (Section 3.3).
+    for chunk in (array.chunks if isinstance(array, pa.ChunkedArray) else [array]):
+        _visit(root, chunk, "", None, entries)
     final = hashlib.sha256(header(KIND_ARRAY, flags))
     final.update(type_json(array.type, flags).encode())
     final.update(_U64.pack(len(array)))
