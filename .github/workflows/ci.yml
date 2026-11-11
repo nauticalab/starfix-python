@@ -112,9 +112,12 @@ jobs:
         run: |
           # Raw media type: no 1 MB limit (format2_v0.5.json is append-only and grows).
           # Tolerate missing files here so the next step prints the explanation.
+          # On failure gh prints the error body to stdout, so keep the file only on success.
           for f in format2_v0.5.json format1_to_format2.json; do
-            gh api -H "Accept: application/vnd.github.raw" \
-              "repos/nauticalab/starfix/contents/tests/golden/$f" > "/tmp/upstream_$f" || true
+            if ! gh api -H "Accept: application/vnd.github.raw" \
+              "repos/nauticalab/starfix/contents/tests/golden/$f" > "/tmp/upstream_$f"; then
+              rm -f "/tmp/upstream_$f"
+            fi
           done
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
