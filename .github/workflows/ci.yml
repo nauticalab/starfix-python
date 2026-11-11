@@ -30,25 +30,51 @@ jobs:
       - name: Run tests
         run: uv run --python ${{ matrix.python-version }} pytest tests/ -v
 
-  test-min-pyarrow:
-    # The oldest supported pyarrow (pyproject: pyarrow>=19.0.0) on the oldest Python.
+  test-pyarrow:
+    # The oldest supported pyarrow (pyproject: pyarrow>=19.0.0) on the oldest Python, 20.0.0
+    # (still lacking some kernels of later versions, e.g. decimal32/64 `filter`), and the
+    # latest pyarrow on PyPI. The pytest run itself asserts the pyarrow it imports
+    # (STARFIX_EXPECT_PYARROW) and prints it in the session header.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pyarrow: "19.0.0"
+            python-version: "3.10"
+          - pyarrow: "20.0.0"
+            python-version: "3.10"
+          - pyarrow: "latest"
+            python-version: "3.13"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Install uv
         uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081  # v5
 
-      - name: Set up Python 3.10
-        run: uv python install 3.10
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --dev --python 3.10
+        run: uv sync --dev --python ${{ matrix.python-version }}
 
-      - name: Run tests on pyarrow 19.0.0
+      - name: Resolve the pyarrow version
+        id: pyarrow
         run: |
-          uv run --python 3.10 --with pyarrow==19.0.0 python -c "import pyarrow; assert pyarrow.__version__ == '19.0.0', pyarrow.__version__; print('pyarrow', pyarrow.__version__)"
-          uv run --python 3.10 --with pyarrow==19.0.0 pytest tests/ -v
+          if [ "${{ matrix.pyarrow }}" = latest ]; then
+            version=$(curl -fsSL https://pypi.org/pypi/pyarrow/json | jq -r .info.version)
+          else
+            version="${{ matrix.pyarrow }}"
+          fi
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests on pyarrow ${{ steps.pyarrow.outputs.version }}
+        env:
+          STARFIX_EXPECT_PYARROW: ${{ steps.pyarrow.outputs.version }}
+        run: |
+          uv run --python ${{ matrix.python-version }} --with "pyarrow==$STARFIX_EXPECT_PYARROW" python -c "import pyarrow; assert pyarrow.__version__ == '$STARFIX_EXPECT_PYARROW', pyarrow.__version__; print('pyarrow', pyarrow.__version__)"
+          uv run --python ${{ matrix.python-version }} --with "pyarrow==$STARFIX_EXPECT_PYARROW" pytest tests/ -v
 
   legacy-differential:
     # starfix.legacy.v0_4 must stay byte-identical to the released starfix-python 0.4.0 (PyPI).

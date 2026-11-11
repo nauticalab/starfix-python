@@ -496,6 +496,23 @@ def _value_width(t: pa.DataType) -> int | None:
     return None
 
 
+_UINT_OF_WIDTH = {1: pa.uint8(), 2: pa.uint16(), 4: pa.uint32(), 8: pa.uint64()}
+
+
+def _as_raw_fixed_width(arr: pa.Array, width: int) -> pa.Array:
+    """The value buffer of a fixed-width array (validity dropped), viewed zero-copy as an
+    unsigned integer of the same width, or as FixedSizeBinary(width) for wider values.
+
+    The bytes and their positions are unchanged, so selecting values of the view selects
+    the same value bytes. Compute kernels are only applied to these views: pyarrow's
+    kernel coverage varies by type and version (e.g. pyarrow 19/20 have no `filter`
+    kernel for decimal32/decimal64), but uint and FixedSizeBinary kernels exist in every
+    supported version.
+    """
+    view_type = _UINT_OF_WIDTH.get(width) or pa.binary(width)
+    return pa.Array.from_buffers(view_type, len(arr), [None, arr.buffers()[1]], null_count=0, offset=arr.offset)
+
+
 def _is_var_length(t: pa.DataType) -> bool:
     return pa.types.is_string(t) or pa.types.is_large_string(t) or pa.types.is_binary(t) or pa.types.is_large_binary(t)
 
@@ -561,6 +578,8 @@ def _hash_dictionary_values(arr: pa.DictionaryArray, bits: pa.Array | None, dige
     width = _value_width(t)
     if width == 0:
         return
+    if width is not None:
+        values = _as_raw_fixed_width(values, width)  # see there: no type-specific kernel
     rows = _CHUNK if width is None else max(1, _BYTE_BUDGET // width)
     for start in range(0, n, rows):
         chunk = indices.slice(start, rows)
@@ -596,9 +615,10 @@ def _hash_values(arr: pa.Array, bits: pa.Array | None, digest) -> None:
             if n:
                 digest.update(memoryview(arr.buffers()[1])[arr.offset * width:(arr.offset + n) * width])
             return
+        raw_values = _as_raw_fixed_width(arr, width)  # see there: no type-specific kernel
         rows = max(1, _BYTE_BUDGET // width)
         for start in range(0, n, rows):
-            chunk = arr.slice(start, rows).filter(bits.slice(start, rows))
+            chunk = raw_values.slice(start, rows).filter(bits.slice(start, rows))
             if len(chunk):
                 raw = memoryview(chunk.buffers()[1])
                 digest.update(raw[chunk.offset * width:(chunk.offset + len(chunk)) * width])

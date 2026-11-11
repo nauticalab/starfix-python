@@ -41,6 +41,13 @@ This note records only the Python-specific decisions.
   rejected with `include_metadata`.
 - Validity bits, lengths and values follow the spec's one rule. Effective validity (own AND
   enclosing struct validity) is computed for every node and written for nullable nodes only.
+- Fixed-width values are selected (null-dropping `filter`, dictionary `take`) on a zero-copy
+  view of their value buffer as an unsigned integer of the same width, or as
+  `FixedSizeBinary(width)`, never with a kernel of the logical type: pyarrow 19 and 20 have no
+  `filter` kernel for decimal32/decimal64, and kernel coverage differs by version. The other
+  compute calls (`filter`/`take` on booleans and integer indices or lengths, `cast` of
+  booleans and lengths, `and`/`or`/`invert`/`all`/`sum`, `is_valid`, `list_parent_indices`,
+  `dictionary_decode` and `take` of nested values) exist for every supported type from 19.0.0.
 
 ## Tests
 
@@ -50,8 +57,14 @@ This note records only the Python-specific decisions.
   slicing at offsets around byte and word boundaries.
 - `tests/test_golden_parity_format2.py`: every vector and relation of `format2_v0.5.json`
   must match, with no skips and no expected failures (pyarrow >= 19, the supported minimum,
-  decodes every vector; CI also runs the suite on exactly pyarrow 19.0.0). The test asserts
+  decodes every vector; CI also runs the suite on exactly pyarrow 19.0.0 and 20.0.0). The test asserts
   minimum vector and relation counts, and an empty parametrization fails at collection.
+- `tests/test_format2_type_matrix.py`: every supported leaf type, with and without nulls,
+  sliced, chunked, split into batches, dictionary-encoded (null keys, keys to null values,
+  nested dictionaries) and nested under list / large_list / struct / dictionary, through
+  `hash_array`, `hash_record_batch`/`hash_table` and the streaming digester. Rust golden values
+  where the golden file has the input; otherwise equality across the equivalent forms. CI runs
+  it on pyarrow 19.0.0, 20.0.0 and the latest, asserting the version pytest imports.
 - The hand-coded literals of the older test files were moved to Rust-produced format-2 values
   (`format1_to_format2.json`). Literals that file did not cover had their inputs recovered by
   recording the calls that produced them (`python_literals_format1_inputs.json`), so Rust could
