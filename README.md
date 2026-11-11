@@ -64,7 +64,7 @@ Keyword-only, all `False` by default, the same names as the Rust `HasherConfig` 
 | Option | Effect |
 |---|---|
 | `ordered_columns` | The order of the top-level columns is part of the hash. |
-| `ordered_struct_fields` | The order of struct fields, at every depth (struct children, list elements, map keys and values, dictionary values), is part of the hash. |
+| `ordered_struct_fields` | The order of struct fields, at every depth (struct children, list and fixed-size list elements, map keys and values, dictionary values), is part of the hash. |
 | `include_metadata` | Schema- and field-level Arrow metadata is part of the hash. A schema without metadata hashes the same either way. |
 
 ```python
@@ -77,12 +77,21 @@ digest = ArrowDigester.hash_table(table, ordered_columns=True, ordered_struct_fi
   DataFrame, or a `pa.StructArray` whose type `struct<a, b>` differs from `struct<b, a>`.
 - Hashes taken with different order options never coincide, even when order cannot matter.
 - With `include_metadata`, metadata is keyed by each field's node path (column `c`, struct
-  child `c/x`, list element `c/`, map key and value `m//key` and `m//value`). Extension types
+  child `c/x`, list or fixed-size list element `c/`, map key and value `m//key` and `m//value`). Extension types
   are hashed as their storage type; with `include_metadata` their `ARROW:extension:name` and
   `ARROW:extension:metadata` are hashed too (see [Extension types](#extension-types)).
 - `hash_array` has no `include_metadata` on purpose: an array carries no schema or field
   metadata. It accepts a `ChunkedArray` (hashed like the combined array).
 - A digester is not thread-safe; a batch rejected by `update` leaves it unchanged.
+
+### Fixed-size lists
+
+`FixedSizeList<T, n>` data is hashed (any size `n`, also 0; at any depth; dictionary-encoded;
+as the storage of extension types such as `arrow.fixed_shape_tensor`). It is its own type: it
+never hashes like `List<T>` / `LargeList<T>` with the same values, like a fixed-size list of
+another size, or like `FixedSizeBinary(n)`. The items under a null slot (or under a slot
+masked by a null struct) never affect the hash, and neither do child positions past the last
+slot; a null of a non-nullable item there is accepted, a visible one is rejected.
 
 ### Extension types
 
@@ -117,9 +126,9 @@ rebuilds the type from them, so starfix-python hashes what pyarrow can observe:
   within a struct, or a name containing `/` that aliases another node (a column `"a/b"` next to
   a struct column `a` with a child `b`). A `/` that aliases nothing (`"km/h"`) is fine;
 - `ListView`, `LargeListView`, `Union` and `RunEndEncoded` types;
-- hashing data of a schema that contains `Null`, `FixedSizeList`, `Map`, `Interval`,
-  `Utf8View` or `BinaryView` (their schemas hash; their data does not), whatever the number of
-  rows;
+- hashing data of a schema that contains `Null`, `Map`, `Interval`, `Utf8View` or `BinaryView`
+  (their schemas hash; their data does not), also inside a fixed-size list, whatever the number
+  of rows;
 - a non-nullable field holding a null that no enclosing struct null explains;
 - with `include_metadata`: a duplicate metadata key on a field or the schema, or explicit
   `ARROW:extension:*` keys that conflict with the field's registered extension type;
@@ -144,8 +153,10 @@ crate has the same restriction.
 Hashing takes time linear in the data size and works on Arrow buffers. Leaf values are fed to
 the digest in bounded chunks without copying the payload, but auxiliary memory is not bounded:
 it grows with the number of visited elements and list items (validity bitmaps, list lengths,
-list parent indices), and the values of a dictionary of struct or list values are materialized
-(decoded with `take`) before they are traversed. Fixed-width, Boolean and list columns hash at tens of millions of rows per second.
+list parent indices), and the values of a dictionary of struct, list or fixed-size list values
+are materialized (decoded with `take`) before they are traversed. A fixed-size list column
+without null slots is hashed from one zero-copy slice of its child; with null slots, its items
+are selected in chunks of about one million items. Fixed-width, Boolean and list columns hash at tens of millions of rows per second.
 String and binary columns hash at about 3 to 5 million rows per second, because each value is
 visited in Python. Each `update` call also costs a few microseconds per column, to check the
 batch's schema. starfix-python is a pure-Python implementation; the Rust crate is faster on

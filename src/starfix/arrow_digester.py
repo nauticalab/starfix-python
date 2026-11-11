@@ -29,8 +29,8 @@ class ArrowDigester:
     Raises ``ValueError`` (in every mode) for: schemas in which two nodes share a path
     (duplicate names, or a name containing ``/`` that aliases another node); ListView,
     LargeListView, Union and RunEndEncoded types; hashing data of a schema containing
-    Null, FixedSizeList, Map, Interval or view types (their schemas hash), whatever the
-    number of rows; a non-nullable field holding a null that no enclosing struct null
+    Null, Map, Interval or view types (their schemas hash; also inside a FixedSizeList),
+    whatever the number of rows; a non-nullable field holding a null that no enclosing struct null
     explains; duplicate metadata keys when ``include_metadata`` is on; and a streamed
     batch whose schema differs from the digester's. Raises ``TypeError`` for a wrong
     container type (for example a Table passed to ``hash_record_batch``).

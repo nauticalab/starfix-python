@@ -5,8 +5,10 @@ type (for example ``filter`` has no decimal32/decimal64 kernel there). This matr
 ``hash_array``, ``hash_record_batch`` and the streaming digester for every supported leaf
 type, with and without nulls, contiguous, sliced at a non-zero offset, split into chunks /
 batches, dictionary-encoded (null keys, valid keys to null values, nested dictionaries),
-and nested under list / large_list / struct / dictionary. CI runs it on pyarrow 19.0.0
-and on the latest pyarrow.
+and nested under list / large_list / struct / dictionary / fixed-size list (n = 0, 1, 2,
+with a null slot and trailing child positions; fixed-size lists inside list / struct /
+dictionary and lists / structs / fixed-size lists inside them). CI runs it on pyarrow
+19.0.0, 20.0.0 and the latest pyarrow.
 
 Expected values:
 
@@ -223,6 +225,34 @@ def _plain_dict_of(wrap: Callable[[pa.Array], pa.Array]) -> Callable[[pa.Array],
     return outer
 
 
+def _fsl_slots(n: int, child: pa.Array) -> int:
+    return len(child) if n == 0 else max(0, (len(child) - 1) // n)
+
+
+def _as_fsl(n: int) -> Callable[[pa.Array], pa.Array]:
+    """FixedSizeList<_, n> over the child, built from buffers: slot 1 is null and hides its n
+    items, and at least one child position trails the last slot (n = 0: all of them)."""
+    def wrap(child: pa.Array) -> pa.Array:
+        slots = _fsl_slots(n, child)
+        t = pa.list_(pa.field("item", child.type, nullable=True), n)
+        return pa.Array.from_buffers(t, slots, [_validity(slots, (1,) if slots > 1 else ())], children=[child])
+    return wrap
+
+
+def _as_fsl_clean(n: int) -> Callable[[pa.Array], pa.Array]:
+    """The logical value of _as_fsl(n)(child) with other physical content: nulls under the
+    null slot and no trailing child positions (concatenated slices, no compute kernel)."""
+    def wrap(child: pa.Array) -> pa.Array:
+        slots = _fsl_slots(n, child)
+        if slots > 1 and n:
+            items = pa.concat_arrays([child.slice(0, n), pa.nulls(n, child.type), child.slice(2 * n, (slots - 2) * n)])
+        else:
+            items = child.slice(0, slots * n)
+        t = pa.list_(pa.field("item", child.type, nullable=True), n)
+        return pa.Array.from_buffers(t, slots, [_validity(slots, (1,) if slots > 1 else ())], children=[items])
+    return wrap
+
+
 _WRAPPERS: dict[str, tuple[Callable[[pa.Array], pa.Array], Callable[[pa.Array], pa.Array]]] = {
     # name: (wrapper, reference wrapper of the plain child)
     "leaf": (lambda a: a, lambda a: a),
@@ -236,6 +266,21 @@ _WRAPPERS: dict[str, tuple[Callable[[pa.Array], pa.Array], Callable[[pa.Array], 
     "dict<large_list<struct>>": (
         _as_dict_of(lambda a: _as_list(True)(_as_struct(a))),
         _plain_dict_of(lambda a: _as_list(True)(_as_struct(a))),
+    ),
+    # FixedSizeList (ITL-927); each reference holds other content under null slots and no
+    # trailing child positions, so hidden content is checked for every leaf type as well.
+    "fsl[2]": (_as_fsl(2), _as_fsl_clean(2)),
+    "fsl[1]": (_as_fsl(1), _as_fsl_clean(1)),
+    "fsl[0]": (_as_fsl(0), _as_fsl_clean(0)),
+    "fsl<struct>": (lambda a: _as_fsl(2)(_as_struct(a)), lambda a: _as_fsl_clean(2)(_as_struct(a))),
+    "fsl<large_list>": (lambda a: _as_fsl(1)(_as_list(True)(a)), lambda a: _as_fsl_clean(1)(_as_list(True)(a))),
+    "fsl<fsl>": (lambda a: _as_fsl(2)(_as_fsl(2)(a)), lambda a: _as_fsl_clean(2)(_as_fsl_clean(2)(a))),
+    "list<fsl>": (lambda a: _as_list(False)(_as_fsl(2)(a)), lambda a: _as_list(False)(_as_fsl_clean(2)(a))),
+    "struct<fsl>": (lambda a: _as_struct(_as_fsl(2)(a)), lambda a: _as_struct(_as_fsl_clean(2)(a))),
+    "dict<fsl>": (_as_dict_of(_as_fsl(2)), _plain_dict_of(_as_fsl_clean(2))),
+    "dict<fsl<struct>>": (
+        _as_dict_of(lambda a: _as_fsl(1)(_as_struct(a))),
+        _plain_dict_of(lambda a: _as_fsl_clean(1)(_as_struct(a))),
     ),
 }
 
