@@ -141,8 +141,11 @@ crate has the same restriction.
 
 ## Performance
 
-Hashing takes time linear in the data size and works on Arrow buffers (bounded temporary
-memory). Fixed-width, Boolean and list columns hash at tens of millions of rows per second.
+Hashing takes time linear in the data size and works on Arrow buffers. Leaf values are fed to
+the digest in bounded chunks without copying the payload, but auxiliary memory is not bounded:
+it grows with the number of visited elements and list items (validity bitmaps, list lengths,
+list parent indices), and the values of a dictionary of struct or list values are materialized
+(decoded with `take`) before they are traversed. Fixed-width, Boolean and list columns hash at tens of millions of rows per second.
 String and binary columns hash at about 3 to 5 million rows per second, because each value is
 visited in Python. Each `update` call also costs a few microseconds per column, to check the
 batch's schema. starfix-python is a pure-Python implementation; the Rust crate is faster on

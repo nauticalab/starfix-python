@@ -7,6 +7,7 @@ specification alone. Section numbers below refer to that document.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import struct
 import sys
@@ -293,18 +294,24 @@ def _exported_extension_metadata(t: pa.DataType) -> bytes:
     return dict(_exported_metadata_pairs(pa.field("x", t))).get(b"ARROW:extension:metadata", b"")
 
 
+class _AmbiguousMetadata(ValueError):
+    """Section 7: metadata that cannot be hashed unambiguously with include_metadata."""
+
+
 def _unique_metadata(pairs: list[tuple[bytes, bytes]], where: str) -> dict[str, str]:
     """Decode metadata pairs; Section 7: a duplicate key is ambiguous and rejected."""
     out: dict[str, str] = {}
     for key, value in pairs:
         k = key.decode("utf-8")
         if k in out:
-            raise ValueError(f"Duplicate metadata key {k!r} on {where}: ambiguous, rejected with include_metadata")
+            raise _AmbiguousMetadata(
+                f"Duplicate metadata key {k!r} on {where}: ambiguous, rejected with include_metadata"
+            )
         out[k] = value.decode("utf-8")
     return out
 
 
-def _field_metadata(field: pa.Field, path: str) -> dict[str, str]:
+def _field_metadata(field: pa.Field) -> dict[str, str]:
     """The field's metadata as stored (Section 2.3), duplicates rejected (Section 7)."""
     explicit = _decode(field.metadata)  # pyarrow's dict view (duplicates collapsed)
     t = field.type
@@ -313,11 +320,11 @@ def _field_metadata(field: pa.Field, path: str) -> dict[str, str]:
     derived = _extension_metadata(t)
     for key, value in derived.items():
         if key in explicit and explicit[key] != value:
-            raise ValueError(
-                f"Field {path!r} carries {key}={explicit[key]!r}, conflicting with its extension type "
+            raise _AmbiguousMetadata(
+                f"{key}={explicit[key]!r} is set, conflicting with its extension type "
                 f"({value!r}): ambiguous, rejected with include_metadata"
             )
-    meta = _unique_metadata(_exported_metadata_pairs(field), f"field {path!r}")
+    meta = _unique_metadata(_exported_metadata_pairs(field), "the field")
     for key, value in derived.items():
         meta.setdefault(key, value)
     # Section 2.3: an absent ARROW:extension:metadata is hashed as "" (absent == empty).
@@ -330,7 +337,10 @@ def phase2_json(schema: pa.Schema) -> str | None:
     """Section 2.3: metadata keyed by node path; None when there is none."""
     fields = {}
     for path, field in schema_nodes(schema):
-        meta = _field_metadata(field, path)
+        try:
+            meta = _field_metadata(field)
+        except _AmbiguousMetadata as exc:
+            raise ValueError(f"Field {path!r}: {exc}") from exc
         if meta:
             fields[path] = meta
     doc: dict[str, Any] = {}
@@ -408,7 +418,7 @@ class _Bits:
 
 
 class _Entry:
-    __slots__ = ("validity", "lengths", "values", "kind")
+    __slots__ = ("kind", "lengths", "validity", "values")
 
     def __init__(self, field: pa.Field) -> None:
         t = _logical(field.type)
@@ -543,7 +553,7 @@ class _VarLengthFeeder:
             self.parts, self.pending = [], 0
 
 
-def _feed_var_length(feeder: "_VarLengthFeeder", data: memoryview, pairs) -> None:
+def _feed_var_length(feeder: _VarLengthFeeder, data: memoryview, pairs) -> None:
     pack = _U64.pack
     for a, b in pairs:
         size = b - a
@@ -632,7 +642,7 @@ def _hash_values(arr: pa.Array, bits: pa.Array | None, digest) -> None:
         for chunk_start in range(0, n, _CHUNK):
             chunk_end = min(chunk_start + _CHUNK, n)
             offs = offsets[arr.offset + chunk_start:arr.offset + chunk_end + 1].tolist()
-            pairs = zip(offs, offs[1:], strict=False)  # consecutive offsets
+            pairs = itertools.pairwise(offs)  # consecutive offsets
             if bits is not None:
                 flags = bits.slice(chunk_start, chunk_end - chunk_start).to_pylist()
                 pairs = (pair for pair, ok in zip(pairs, flags, strict=True) if ok)

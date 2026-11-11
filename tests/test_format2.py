@@ -876,15 +876,20 @@ def test_duplicate_metadata_keys_rejected_with_include_metadata(where) -> None:
     else:
         schema = pa.schema([pa.field("s", pa.struct([pa.field("c", pa.int8(), metadata=dup)]))])
     f2.hash_schema(schema)  # metadata not hashed: accepted
-    with pytest.raises(ValueError, match="Duplicate metadata key 'a'"):
+    message = {
+        "field": "^Field 'x': Duplicate metadata key 'a' on the field",
+        "schema": "^Duplicate metadata key 'a' on the schema",
+        "struct_child": "^Field 's/c': Duplicate metadata key 'a' on the field",
+    }[where]
+    with pytest.raises(ValueError, match=message):
         f2.hash_schema(schema, include_metadata=True)
-    with pytest.raises(ValueError, match="Duplicate metadata key"):
+    with pytest.raises(ValueError, match=message):
         f2.Digester(schema, include_metadata=True)
 
 
 def test_explicit_extension_keys_conflicting_with_the_type_rejected(point_type) -> None:
     conflicting = pa.schema([pa.field("p", point_type("km"), metadata={"ARROW:extension:name": "other"})])
-    with pytest.raises(ValueError, match="conflicting with its extension type"):
+    with pytest.raises(ValueError, match="^Field 'p': ARROW:extension:name='other' is set, conflicting with its extension type"):
         f2.hash_schema(conflicting, include_metadata=True)
     agreeing = pa.schema([pa.field("p", point_type("km"), metadata={"ARROW:extension:name": "starfix.test.point"})])
     assert f2.hash_schema(agreeing, include_metadata=True) == f2.hash_schema(
