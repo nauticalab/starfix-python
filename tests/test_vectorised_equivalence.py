@@ -206,3 +206,20 @@ def test_dictionary_inside_list_matches_reference(values) -> None:
         assert ArrowDigester.hash_array(arr) == ReferenceDigester.hash_array(arr)
         batch = pa.record_batch([arr], names=["c"])
         assert ArrowDigester.hash_record_batch(batch) == ReferenceDigester.hash_record_batch(batch)
+
+
+@pytest.mark.parametrize("seed", range(50))
+def test_bitvec_bitmap_append_matches_push(seed: int) -> None:
+    from starfix.arrow_digester import _BitVec
+
+    rng = random.Random(seed)
+    one, bulk = _BitVec(), _BitVec()
+    for _ in range(rng.randint(1, 5)):
+        bits = [rng.random() < 0.5 for _ in range(rng.randint(0, 40))]
+        start = rng.randint(0, len(bits))
+        arr = pa.array(bits, pa.bool_()).slice(start)  # bitmap read at a bit offset
+        for b in bits[start:]:
+            one.push(b)
+        bulk.extend_bitmap(arr.buffers()[1], arr.offset, len(arr))
+    assert len(one) == len(bulk)
+    assert one.raw_bytes() == bulk.raw_bytes()

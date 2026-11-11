@@ -64,6 +64,14 @@ class _BitVec:
             value = int.from_bytes(memoryview(packed)[: (n + 7) >> 3], "little")
             self._extend_int(value & ((1 << n) - 1), n)
 
+    def extend_bitmap(self, bitmap, bit_offset: int, n: int) -> None:
+        """Append n bits of an Arrow LSB-first bitmap buffer, starting at bit_offset."""
+        if n:
+            first = bit_offset >> 3
+            raw = memoryview(bitmap)[first:(bit_offset + n + 7) >> 3]
+            value = int.from_bytes(raw, "little") >> (bit_offset & 7)
+            self._extend_int(value & ((1 << n) - 1), n)
+
     def _extend_int(self, value: int, n: int) -> None:
         """Append the n low bits of `value`, bit 0 first."""
         if n == 0:
@@ -734,75 +742,104 @@ def _element_size_for_type(dt: pa.DataType) -> int | None:
     return None
 
 
-def _hash_fixed_size_data(arr, data_digest, element_size: int, effective_nulls) -> None:
-    """Hash a fixed-width array's data bytes (spec Section 3.1)."""
-    bufs = arr.buffers()
-    data_buf = bufs[1]
-    offset = arr.offset
+def _valid_only(arr, effective_nulls):
+    """`arr` restricted to its effective-valid elements (contiguous, zero-copy if none null)."""
+    import pyarrow as pa
 
+    if effective_nulls is None or all(effective_nulls):
+        return arr
+    return arr.filter(pa.array(effective_nulls, pa.bool_()))
+
+
+def _hash_fixed_size_data(arr, data_digest, element_size: int, effective_nulls) -> None:
+    """Hash a fixed-width array's data bytes (spec Section 3.1): valid elements only."""
+    import pyarrow as pa
+
+    if pa.types.is_dictionary(arr.type):
+        # Reached only for a dictionary nested in a list, whose declared (canonical)
+        # type is the value type. The released implementation hashes the INDEX buffer
+        # here; that is a known defect (ITL-908 report), kept byte for byte so this
+        # change stays hash-neutral. Fixed with the format-2 layout.
+        _hash_fixed_size_data_legacy_dictionary(arr, data_digest, element_size, effective_nulls)
+        return
+    valid = _valid_only(arr, effective_nulls)
     # A zero-copy view: `arr` is often a slice of a large shared buffer (one row of a
     # list column), and copying the whole buffer per slice made lists quadratic.
-    raw = memoryview(data_buf)
-    start = offset * element_size
+    raw = memoryview(valid.buffers()[1])
+    start = valid.offset * element_size
+    data_digest.update(raw[start:start + len(valid) * element_size])
 
-    if effective_nulls is None:
-        # Non-nullable or all valid: feed entire contiguous buffer
-        end = start + len(arr) * element_size
-        data_digest.update(raw[start:end])
-    else:
-        # Nullable: feed only valid elements
-        has_nulls = any(not v for v in effective_nulls)
-        if has_nulls:
-            for i in range(len(arr)):
-                if effective_nulls[i]:
-                    pos = start + i * element_size
-                    data_digest.update(raw[pos:pos + element_size])
-        else:
-            end = start + len(arr) * element_size
-            data_digest.update(raw[start:end])
+
+def _hash_fixed_size_data_legacy_dictionary(arr, data_digest, element_size, effective_nulls) -> None:
+    """The released per-element code path, verbatim, for dictionary arrays (see caller)."""
+    raw = memoryview(arr.buffers()[1])
+    start = arr.offset * element_size
+    if effective_nulls is None or all(effective_nulls):
+        data_digest.update(raw[start:start + len(arr) * element_size])
+        return
+    for i in range(len(arr)):
+        if effective_nulls[i]:
+            pos = start + i * element_size
+            data_digest.update(raw[pos:pos + element_size])
 
 
 def _hash_boolean_data(arr, data_digest, effective_nulls) -> None:
-    """Hash boolean array data bits (spec Section 3.2)."""
+    """Hash boolean array data bits (spec Section 3.2): valid values, bit-packed per call."""
+    import pyarrow as pa
+
+    valid = _valid_only(arr, effective_nulls)
+    if pa.types.is_dictionary(valid.type):
+        valid = valid.dictionary_decode()
     bv = _BitVec()
-    if effective_nulls is None:
-        for i in range(len(arr)):
-            bv.push(arr[i].as_py())
-    else:
-        for i in range(len(arr)):
-            if effective_nulls[i]:
-                bv.push(arr[i].as_py())
+    if len(valid):
+        bv.extend_bitmap(valid.buffers()[1], valid.offset, len(valid))
     data_digest.update(bv.raw_bytes())
+
+
+# Elements per chunk when serializing variable-length values (bounds temporary memory).
+_VAR_CHUNK = 1 << 16
+
+
+def _hash_var_length_data(arr, data_digest, effective_nulls) -> None:
+    """Hash LargeBinary / LargeUtf8 data (spec Section 3.3).
+
+    For each valid element: its byte length as u64 LE, then its bytes, read straight
+    from the offsets and data buffers (UTF-8 for strings, as stored).
+    """
+    import pyarrow as pa
+
+    valid = _valid_only(arr, effective_nulls)
+    if pa.types.is_dictionary(valid.type):
+        valid = valid.dictionary_decode()  # values, as the released .as_py() hashed
+    n = len(valid)
+    if n == 0:
+        return
+    # Physical offsets may be 32-bit: inside a list the declared (canonical) type is
+    # LargeUtf8/LargeBinary while the child array can still be Utf8/Binary.
+    large = pa.types.is_large_string(valid.type) or pa.types.is_large_binary(valid.type)
+    width = 8 if large else 4
+    bufs = valid.buffers()
+    first = valid.offset * width
+    offsets = memoryview(bufs[1])[first:first + (n + 1) * width].cast("q" if large else "i")
+    data = memoryview(bufs[2]) if bufs[2] is not None else memoryview(b"")
+    pack = struct.Struct("<Q").pack
+    for chunk_start in range(0, n, _VAR_CHUNK):
+        parts = []
+        for i in range(chunk_start, min(chunk_start + _VAR_CHUNK, n)):
+            a, b = offsets[i], offsets[i + 1]
+            parts.append(pack(b - a))
+            parts.append(data[a:b])
+        data_digest.update(b"".join(parts))
 
 
 def _hash_binary_data(arr, data_digest, effective_nulls) -> None:
     """Hash binary array data (spec Section 3.3)."""
-    if effective_nulls is None:
-        for i in range(len(arr)):
-            val = arr[i].as_py()
-            data_digest.update(struct.pack("<Q", len(val)))
-            data_digest.update(val)
-    else:
-        for i in range(len(arr)):
-            if effective_nulls[i]:
-                val = arr[i].as_py()
-                data_digest.update(struct.pack("<Q", len(val)))
-                data_digest.update(val)
+    _hash_var_length_data(arr, data_digest, effective_nulls)
 
 
 def _hash_string_data(arr, data_digest, effective_nulls) -> None:
     """Hash string array data (spec Section 3.3)."""
-    if effective_nulls is None:
-        for i in range(len(arr)):
-            val = arr[i].as_py().encode("utf-8")
-            data_digest.update(struct.pack("<Q", len(val)))
-            data_digest.update(val)
-    else:
-        for i in range(len(arr)):
-            if effective_nulls[i]:
-                val = arr[i].as_py().encode("utf-8")
-                data_digest.update(struct.pack("<Q", len(val)))
-                data_digest.update(val)
+    _hash_var_length_data(arr, data_digest, effective_nulls)
 
 
 # ---------------------------------------------------------------------------
