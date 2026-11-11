@@ -30,6 +30,26 @@ jobs:
       - name: Run tests
         run: uv run --python ${{ matrix.python-version }} pytest tests/ -v
 
+  test-min-pyarrow:
+    # The oldest supported pyarrow (pyproject: pyarrow>=19.0.0) on the oldest Python.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081  # v5
+
+      - name: Set up Python 3.10
+        run: uv python install 3.10
+
+      - name: Install dependencies
+        run: uv sync --dev --python 3.10
+
+      - name: Run tests on pyarrow 19.0.0
+        run: |
+          uv run --python 3.10 --with pyarrow==19.0.0 python -c "import pyarrow; assert pyarrow.__version__ == '19.0.0', pyarrow.__version__; print('pyarrow', pyarrow.__version__)"
+          uv run --python 3.10 --with pyarrow==19.0.0 pytest tests/ -v
+
   license-check:
     runs-on: ubuntu-latest
     steps:

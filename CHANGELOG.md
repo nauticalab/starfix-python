@@ -48,6 +48,9 @@ buffers: at 1M rows, `list<int32>` takes about 20 ms instead of an estimated 90 
 
 ### Changed (breaking)
 
+- **Requires pyarrow >= 19** (was >= 14): older pyarrow cannot read Decimal32/Decimal64 data
+  from Arrow IPC, so the golden parity (every vector matched) holds for every supported
+  pyarrow version only from 19 on.
 - In every mode, `ValueError` is raised for schemas with duplicate or `/`-aliased field paths;
   for `ListView`, `LargeListView`, `Union` and `RunEndEncoded` types; for hashing data of
   `Null`, `FixedSizeList`, `Map`, `Interval` and view types (previously `NotImplementedError`

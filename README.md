@@ -24,6 +24,8 @@ Produces stable SHA-256 hashes of Arrow schemas, tables, record batches and arra
 pip install starfix
 ```
 
+Requires Python >= 3.10 and pyarrow >= 19.
+
 ## Usage
 
 ```python

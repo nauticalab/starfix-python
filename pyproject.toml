@@ -14,7 +14,7 @@ keywords = ["arrow", "hashing"]
 classifiers = [
     "Programming Language :: Python :: 3",
 ]
-dependencies = ["pyarrow>=14.0.0"]
+dependencies = ["pyarrow>=19.0.0"]
 
 [dependency-groups]
 dev = ["pytest>=9.0.2", "pip-licenses>=5.0.0"]

@@ -411,8 +411,6 @@ def test_rejected_schemas(schema) -> None:
 
 
 def test_list_view_rejected() -> None:
-    if not hasattr(pa, "list_view"):
-        pytest.skip("pyarrow without list_view")
     with pytest.raises(ValueError):
         f2.hash_schema(pa.schema([pa.field("v", pa.list_view(pa.int8()))]))
 
@@ -571,8 +569,6 @@ def test_extension_name_without_metadata_key_is_hashed_as_empty_metadata() -> No
 
 def test_builtin_uuid_extension_with_canonical_metadata() -> None:
     """arrow.uuid stored with an empty metadata value: exact (E1 covers other stored forms)."""
-    if not hasattr(pa, "uuid"):
-        pytest.skip("pyarrow without a registered arrow.uuid")
     stored = pa.schema([pa.field("u", pa.binary(16), metadata={
         "ARROW:extension:name": "arrow.uuid", "ARROW:extension:metadata": ""})])
     batch = pa.record_batch([pa.array([b"\x01" * 16, None], pa.binary(16))], schema=stored)

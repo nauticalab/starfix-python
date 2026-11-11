@@ -39,6 +39,28 @@ import pytest
 from starfix.arrow_digester import ArrowDigester
 
 
+def _with_type(arr: pa.Array, t: pa.DataType) -> pa.Array:
+    """`arr` rebuilt with the field nullability of struct type `t` (same data).
+
+    pyarrow 19 cannot cast a struct whose children are nullable to one whose children
+    are not, which pa.record_batch(..., schema=...) would otherwise do.
+    """
+    if not pa.types.is_struct(t) or not pa.types.is_struct(arr.type):
+        return arr
+    children = [_with_type(arr.field(i), t.field(i).type) for i in range(t.num_fields)]
+    mask = arr.is_null() if arr.null_count else None
+    return pa.StructArray.from_arrays(children, fields=list(t), mask=mask)
+
+
+def _record_batch(columns, schema: pa.Schema) -> pa.RecordBatch:
+    if isinstance(columns, dict):
+        columns = [columns[f.name] for f in schema]
+    return pa.record_batch(
+        [_with_type(c, f.type) if isinstance(c, pa.Array) else c for c, f in zip(columns, schema)],
+        schema=schema,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Empty arrays
 # ---------------------------------------------------------------------------
@@ -177,7 +199,7 @@ class TestThreeLevelStruct:
             [{"x": 100, "mid": {"y": 200, "z": 300}}],
             type=outer_type,
         )
-        batch = pa.record_batch({"top": col}, schema=schema)
+        batch = _record_batch({"top": col}, schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
         assert result == "000002009faf5f41303751117910475f04c0c6685450681ca6f45daf01446040b984db"
 
@@ -251,7 +273,7 @@ class TestStructWithListChild:
             names=["id", "tags"],
         )
         schema = pa.schema([pa.field("record", struct_type, nullable=False)])
-        batch = pa.record_batch([struct_arr], schema=schema)
+        batch = _record_batch([struct_arr], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
         assert result == "000002a8d980079fe57b52e69f297f5614ec02e45fdb53fdabc08cf05caa92c6064a83"
 
@@ -291,7 +313,7 @@ class TestNullableStructBatch:
             pa.field("b", pa.bool_(), nullable=False),
         ])
         schema = pa.schema([pa.field("s", struct_type, nullable=True)])
-        batch = pa.record_batch([struct_array], schema=schema)
+        batch = _record_batch([struct_array], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
         assert result == "0000022f9448c97edd56a482426bafca4eccd64ccbec8640970e98f0425ffc0dc95a0b"
 
@@ -445,7 +467,7 @@ class TestMixedStructListBatch:
             type=pa.large_list(pa.field("item", pa.large_utf8(), nullable=True)),
         )
 
-        batch = pa.record_batch([id_arr, meta_arr, tags_arr], schema=schema)
+        batch = _record_batch([id_arr, meta_arr, tags_arr], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
         assert result == "000002fb371b308310a0003de7e0175d54abb92e3792573fb3afbd322e35b544ee87b0"
 
@@ -513,7 +535,7 @@ class TestBatchAllNullColumn:
             pa.field("id", pa.int32(), nullable=False),
             pa.field("value", pa.large_utf8(), nullable=True),
         ])
-        batch = pa.record_batch(
+        batch = _record_batch(
             {
                 "id": pa.array([1, 2, 3], type=pa.int32()),
                 "value": pa.array([None, None, None], type=pa.large_utf8()),
@@ -676,7 +698,7 @@ class TestListOfList:
             type=pa.large_list(outer_field),
         )
         schema = pa.schema([pa.field("col", pa.large_list(outer_field), nullable=False)])
-        batch = pa.record_batch([outer_list], schema=schema)
+        batch = _record_batch([outer_list], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
         assert result == "000002d4a91c629161ff8126db429572a4cd20c19ffa1d1f31db8c6eec0489d668216f"
 
@@ -799,7 +821,7 @@ class TestNullableListStructNullableChildren:
         schema = pa.schema([
             pa.field("items", pa.large_list(inner_field), nullable=True),
         ])
-        batch = pa.record_batch([list_array], schema=schema)
+        batch = _record_batch([list_array], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
         assert result == "000002b5fde83bc94e02aa663fe4c1aad59a5280c6f0d487decd0b66801abe35d43104"
 
@@ -847,13 +869,13 @@ class TestMultiBatchStruct:
             [pa.array([1, 2], type=pa.int32()), pa.array([10, None], type=pa.int32())],
             names=["x", "y"],
         )
-        batch1 = pa.record_batch([s1], schema=schema)
+        batch1 = _record_batch([s1], schema=schema)
 
         s2 = pa.StructArray.from_arrays(
             [pa.array([3], type=pa.int32()), pa.array([30], type=pa.int32())],
             names=["x", "y"],
         )
-        batch2 = pa.record_batch([s2], schema=schema)
+        batch2 = _record_batch([s2], schema=schema)
 
         d = ArrowDigester(schema)
         d.update(batch1)
@@ -881,13 +903,13 @@ class TestMultiBatchList:
             [[1, 2], None],
             type=list_type,
         )
-        batch1 = pa.record_batch([arr1], schema=schema)
+        batch1 = _record_batch([arr1], schema=schema)
 
         arr2 = pa.array(
             [[3, 4, 5]],
             type=list_type,
         )
-        batch2 = pa.record_batch([arr2], schema=schema)
+        batch2 = _record_batch([arr2], schema=schema)
 
         d = ArrowDigester(schema)
         d.update(batch1)
@@ -1020,7 +1042,7 @@ class TestRealisticBatch:
             mask=reading_mask,
         )
 
-        batch = pa.record_batch([name_arr, coords_arr, readings_arr], schema=schema)
+        batch = _record_batch([name_arr, coords_arr, readings_arr], schema=schema)
         result = ArrowDigester.hash_record_batch(batch).hex()
         assert result == "000002d334ea76f2a30807791177def39034f19caf4e6bd142c23ec05cc192298893de"
 
