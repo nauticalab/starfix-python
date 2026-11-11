@@ -295,7 +295,7 @@ class TestSpecSection2Examples:
 # ── Spec Section 9.8: invariants ───────────────────────────────────────
 
 
-def _struct_xy(order: str, nullable_struct: bool = False) -> pa.StructArray:
+def _struct_xy(order: str) -> pa.StructArray:
     vals = {"x": pa.array([1, 2], pa.int32()), "y": pa.array([True, False])}
     return pa.StructArray.from_arrays(
         [vals[n] for n in order],
@@ -767,4 +767,4 @@ class TestKeywordOnly:
         """All 8 combinations are accepted and each is reachable by keywords alone."""
         schema = pa.schema([pa.field("a", pa.int32())])
         for bits in itertools.product([False, True], repeat=3):
-            ArrowDigester.hash_schema(schema, **dict(zip((OC, OSF, NV), bits)))
+            ArrowDigester.hash_schema(schema, **dict(zip((OC, OSF, NV), bits, strict=True)))
