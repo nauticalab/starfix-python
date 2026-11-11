@@ -65,8 +65,8 @@ def _hash(vector: dict[str, Any]) -> str:
 
 
 # Counts of the final golden file; the file is append-only, so they can only grow.
-_MIN_VECTORS = 339
-_MIN_RELATIONS = 96
+_MIN_VECTORS = 423
+_MIN_RELATIONS = 114
 
 
 def test_fixture_is_well_formed() -> None:

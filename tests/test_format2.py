@@ -971,3 +971,72 @@ def test_big_endian_hosts_are_refused(monkeypatch) -> None:
     ):
         with pytest.raises(NotImplementedError, match="little-endian"):
             call()
+
+
+# ── Hidden nulls the Rust review found (starfix e079d56) ─────────────────
+
+_RB_OPTIONS = [
+    dict(include_metadata=im, ordered_columns=oc, ordered_struct_fields=osf)
+    for im in (False, True) for oc in (False, True) for osf in (False, True)
+]
+_ARRAY_OPTIONS = [dict(ordered_columns=oc, ordered_struct_fields=osf) for oc in (False, True) for osf in (False, True)]
+
+
+def test_nested_list_leaf_null_hidden_under_null_inner_list_any_batching() -> None:
+    """x: List<List<Int32 non-null> nullable> nullable, rows [[null], null, [[8]]].
+
+    The leaf under the null inner list is null (hidden). hash_array, one batch and three
+    single-row batches succeed and equal the clean form, under every option combination.
+    """
+    inner_t = pa.list_(pa.field("item", pa.int32(), nullable=False))
+    outer_t = pa.list_(pa.field("item", inner_t, nullable=True))
+    schema = pa.schema([pa.field("x", outer_t, nullable=True)])
+
+    def build(leaf: pa.Array, inner_offsets: list[int]) -> pa.Array:
+        inner = pa.ListArray.from_arrays(pa.array(inner_offsets, pa.int32()), leaf, type=inner_t,
+                                         mask=pa.array([True, False]))
+        return pa.ListArray.from_arrays(pa.array([0, 1, 1, 2], pa.int32()), inner, type=outer_t,
+                                        mask=pa.array([False, True, False]))
+
+    hidden = build(pa.array([None, 8], pa.int32()), [0, 1, 2])
+    clean = build(pa.array([8], pa.int32()), [0, 0, 1])
+    assert hidden.values.values.null_count == 1 and clean.values.values.null_count == 0
+    assert hidden.to_pylist() == clean.to_pylist() == [[None], None, [[8]]]
+
+    for options in _ARRAY_OPTIONS:
+        assert f2.hash_array(hidden, **options) == f2.hash_array(clean, **options), options
+    for options in _RB_OPTIONS:
+        expected = f2.hash_record_batch(pa.record_batch([clean], schema=schema), **options)
+        assert f2.hash_record_batch(pa.record_batch([hidden], schema=schema), **options) == expected, options
+        d = f2.Digester(schema, **options)
+        for row in range(3):
+            d.update(pa.record_batch([hidden.slice(row, 1)], schema=schema))
+        assert d.finalize() == expected, options
+
+
+@pytest.mark.parametrize("child_valid", [True, False], ids=["child_valid", "child_null"])
+def test_dictionary_of_struct_leaf_null_hidden_under_null_outer_struct(child_valid: bool) -> None:
+    """Dictionary<Int8, Struct<child: Struct<i: Int32 non-null> non-null>>, a null outer value.
+
+    The leaf (and optionally the child struct) beneath the null outer struct is null; it is
+    masked by its ancestor, so the dictionary-encoded column equals the plain one.
+    """
+    i_field = pa.field("i", pa.int32(), nullable=False)
+    child_t = pa.struct([i_field])
+    child_field = pa.field("child", child_t, nullable=False)
+    outer_t = pa.struct([child_field])
+
+    child = pa.StructArray.from_arrays([pa.array([1, None], pa.int32())], fields=[i_field],
+                                       mask=pa.array([False, not child_valid]))
+    values = pa.StructArray.from_arrays([child], fields=[child_field], mask=pa.array([False, True]))
+    assert values.field(0).field(0).null_count == 1
+    dict_arr = pa.DictionaryArray.from_arrays(pa.array([0, 1, 0, None, 1], pa.int8()), values)
+    plain = pa.array([{"child": {"i": 1}}, None, {"child": {"i": 1}}, None, None], outer_t)
+    assert dict_arr.to_pylist() == plain.to_pylist()
+
+    for options in _ARRAY_OPTIONS:
+        assert f2.hash_array(dict_arr, **options) == f2.hash_array(plain, **options), options
+    for options in _RB_OPTIONS:
+        assert f2.hash_record_batch(
+            pa.record_batch([dict_arr], schema=pa.schema([pa.field("d", dict_arr.type)])), **options
+        ) == f2.hash_record_batch(pa.record_batch([plain], schema=pa.schema([pa.field("d", outer_t)])), **options), options
