@@ -270,6 +270,28 @@ class TestPhase1Json:
         assert got == V + sha(tag(0x01), phase1, phase2)
 
 
+class TestSpecSection2Examples:
+    """Literal examples added to spec Section 2.1 for ITL-898."""
+
+    def test_fixed_size_list_example(self):
+        schema = pa.schema([pa.field("f", pa.list_(pa.field("item", pa.int32(), nullable=True), 2), nullable=False)])
+        json_ = b'{"f":{"data_type":{"FixedSizeList":[{"data_type":"Int32","nullable":true},2]},"nullable":false}}'
+        expected = "000001faa6e75b09b2788440c79a1e297c73c75a5cb4d36c9f9cad6e3062a33c91c696"
+        assert (V + sha(json_)).hex() == expected
+        assert ArrowDigester.hash_schema(schema).hex() == expected
+
+    @pytest.mark.parametrize("flags", ALL_FLAGS)
+    def test_json_text_rules_control_characters(self, flags):
+        """`a<LF>b<U+001B>` serializes as "a\\nb\\u001b"; '/' and U+007F stay raw."""
+        schema = pa.schema([pa.field("a\nb\x1b/\x7f\"\\", pa.int8(), nullable=False)])
+        name = b'"a\\nb\\u001b/\x7f\\"\\\\"'
+        if flags & 0x01:
+            json_ = b'[{"data_type":"Int8","name":' + name + b',"nullable":false}]'
+        else:
+            json_ = b"{" + name + b':{"data_type":"Int8","nullable":false}}'
+        prefix = tag(flags) if flags else b""
+        assert ArrowDigester.hash_schema(schema, **opts(flags)) == V + sha(prefix, json_)
+
 # ── Spec Section 9.8: invariants ───────────────────────────────────────
 
 
@@ -684,6 +706,17 @@ class TestStreaming:
         other = pa.record_batch([pa.array([1, 2], pa.int64()), pa.array(["x", None])], names=["a", "b"])
         with pytest.raises(ValueError, match="does not match"):
             d.update(other)
+
+    @pytest.mark.parametrize("flags", [f for f in ALL_FLAGS if f])
+    def test_metadata_mismatch_rejected_with_include_metadata(self, flags):
+        """Spec 9.7 rule 2: with include_metadata the Phase 2 documents must be equal."""
+        plain = pa.schema([pa.field("a", pa.int32())])
+        meta = pa.schema([pa.field("a", pa.int32(), metadata={"k": "v"})])
+        batch = pa.record_batch([pa.array([1], pa.int32())], schema=meta)
+        ArrowDigester(plain, **opts(flags)).update(batch)  # metadata ignored without include_metadata
+        d = ArrowDigester(plain, include_metadata=True, **opts(flags))
+        with pytest.raises(ValueError, match="does not match"):
+            d.update(batch)
 
     @pytest.mark.parametrize("flags", ALL_FLAGS)
     def test_equivalent_physical_types_accepted(self, flags):

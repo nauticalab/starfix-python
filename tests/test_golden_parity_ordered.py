@@ -105,6 +105,8 @@ def test_fixture_is_well_formed() -> None:
 _KNOWN_DEFAULT_MODE_DIVERGENCES = {
     "map_struct_ab_schema_f0": "default Map JSON omits the value type (known divergence)",
     "map_struct_ba_schema_f0": "default Map JSON omits the value type (known divergence)",
+    "names_array_struct_f0": "default hash_array type JSON escapes non-ASCII (known divergence)",
+    "names_array_struct_int8_f0": "default hash_array type JSON escapes non-ASCII (known divergence)",
 }
 
 
