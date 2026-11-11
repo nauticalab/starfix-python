@@ -659,7 +659,9 @@ def _hash_fixed_size_data(arr, data_digest, element_size: int, effective_nulls) 
     data_buf = bufs[1]
     offset = arr.offset
 
-    raw = data_buf.to_pybytes()
+    # A zero-copy view: `arr` is often a slice of a large shared buffer (one row of a
+    # list column), and copying the whole buffer per slice made lists quadratic.
+    raw = memoryview(data_buf)
     start = offset * element_size
 
     if effective_nulls is None:
