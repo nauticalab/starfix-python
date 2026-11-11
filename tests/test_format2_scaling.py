@@ -88,3 +88,22 @@ def test_nullable_list_of_binary_does_not_copy_the_payload() -> None:
     finally:
         pa.set_memory_pool(default)
     assert pool.max_memory() < payload // 4, f"Arrow peak {pool.max_memory()} bytes for a {payload}-byte payload"
+
+
+def test_dictionary_leaves_are_not_decoded_as_a_whole() -> None:
+    """Few large dictionary values referenced many times: hashed from the dictionary buffers."""
+    big = pa.array([b"x" * (1 << 20), b"y" * 10, None], pa.large_binary())  # one 1 MiB value
+    indices = pa.array([0, 1, 0, None, 2] * 40, pa.int32())  # 80 references to the 1 MiB value
+    arr = pa.DictionaryArray.from_arrays(indices, big)
+    decoded_size = 80 * (1 << 20)
+    f2.hash_array(arr.slice(0, 2))  # warm up
+
+    default = pa.default_memory_pool()
+    pool = pa.proxy_memory_pool(default)
+    pa.set_memory_pool(pool)
+    try:
+        f2.hash_array(arr)
+        f2.hash_record_batch(pa.record_batch([arr], names=["d"]))
+    finally:
+        pa.set_memory_pool(default)
+    assert pool.max_memory() < decoded_size // 20, f"Arrow peak {pool.max_memory()} bytes (decoded: {decoded_size})"

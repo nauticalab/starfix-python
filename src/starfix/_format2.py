@@ -396,14 +396,36 @@ class _Entry:
 
 
 def _resolve(arr: pa.Array) -> pa.Array:
-    """Extension arrays -> storage; dictionary arrays -> decoded values (repeatedly)."""
+    """Extension arrays -> storage, repeatedly. Dictionaries are hashed as their values:
+
+    - a dictionary of leaf values stays encoded (its values are read through the indices
+      from the dictionary buffers, so the logical payload is never materialized); nested
+      dictionaries and extension values are resolved inside its dictionary only;
+    - a dictionary of struct or list values is decoded (its children are traversed).
+    """
     while True:
         if isinstance(arr, pa.ExtensionArray):
             arr = arr.storage
         elif pa.types.is_dictionary(arr.type):
-            arr = arr.dictionary_decode()
+            values = _resolve(arr.dictionary)
+            if pa.types.is_dictionary(values.type):  # resolved values are plain or decoded
+                values = values.dictionary_decode()
+            t = values.type
+            if pa.types.is_struct(t) or _is_list(t) or pa.types.is_fixed_size_list(t) or pa.types.is_map(t):
+                arr = values.take(arr.indices)
+            else:
+                return arr if values is arr.dictionary else pa.DictionaryArray.from_arrays(arr.indices, values)
         else:
             return arr
+
+
+def _logical_validity(arr: pa.Array) -> pa.Array | None:
+    """Per-element validity (None: all valid). A dictionary element is valid iff its index
+    is valid and the dictionary value it points to is valid."""
+    if pa.types.is_dictionary(arr.type):
+        valid = pc.fill_null(pc.take(arr.dictionary.is_valid(), arr.indices), False)
+        return None if pc.all(valid).as_py() is not False else valid
+    return arr.is_valid() if arr.null_count else None
 
 
 def _and(a: pa.Array | None, b: pa.Array | None) -> pa.Array | None:
@@ -426,11 +448,88 @@ def _value_width(t: pa.DataType) -> int | None:
     return None
 
 
+def _is_var_length(t: pa.DataType) -> bool:
+    return pa.types.is_string(t) or pa.types.is_large_string(t) or pa.types.is_binary(t) or pa.types.is_large_binary(t)
+
+
+def _var_length_buffers(arr: pa.Array) -> tuple[memoryview, memoryview]:
+    """The whole offsets buffer (as integers) and data buffer of a string/binary array."""
+    large = pa.types.is_large_string(arr.type) or pa.types.is_large_binary(arr.type)
+    size = 8 if large else 4
+    bufs = arr.buffers()
+    raw = memoryview(bufs[1])
+    offsets = raw[: len(raw) // size * size].cast("q" if large else "i")
+    data = memoryview(bufs[2]) if bufs[2] is not None else memoryview(b"")
+    return offsets, data
+
+
+class _VarLengthFeeder:
+    """Feeds `u64 length || bytes` values to a digest in updates of about _BYTE_BUDGET bytes;
+    a value of at least that size is fed straight from its buffer (no copy)."""
+
+    __slots__ = ("digest", "parts", "pending")
+
+    def __init__(self, digest) -> None:
+        self.digest, self.parts, self.pending = digest, [], 0
+
+    def flush(self) -> None:
+        if self.parts:
+            self.digest.update(b"".join(self.parts))
+            self.parts, self.pending = [], 0
+
+
+def _feed_var_length(feeder: "_VarLengthFeeder", data: memoryview, pairs) -> None:
+    pack = _U64.pack
+    for a, b in pairs:
+        size = b - a
+        if size >= _BYTE_BUDGET:
+            feeder.parts.append(pack(size))
+            feeder.flush()
+            feeder.digest.update(data[a:b])
+            continue
+        feeder.parts.append(pack(size))
+        feeder.parts.append(data[a:b])
+        feeder.pending += 8 + size
+        if feeder.pending >= _BYTE_BUDGET:
+            feeder.flush()
+
+
+def _hash_dictionary_values(arr: pa.DictionaryArray, bits: pa.Array | None, digest) -> None:
+    """Leaf values of a dictionary array, read through its indices (never decoded whole)."""
+    values, indices, n = arr.dictionary, arr.indices, len(arr)
+    t = values.type
+    if _is_var_length(t):
+        offsets, data = _var_length_buffers(values)
+        base = values.offset
+        feeder = _VarLengthFeeder(digest)
+        for start in range(0, n, _CHUNK):
+            chunk = indices.slice(start, _CHUNK)
+            if bits is not None:
+                chunk = chunk.filter(bits.slice(start, _CHUNK))
+            ids = chunk.to_pylist()
+            _feed_var_length(feeder, data, ((offsets[base + j], offsets[base + j + 1]) for j in ids))
+        feeder.flush()
+        return
+    width = _value_width(t)
+    if width == 0:
+        return
+    rows = _CHUNK if width is None else max(1, _BYTE_BUDGET // width)
+    for start in range(0, n, rows):
+        chunk = indices.slice(start, rows)
+        if bits is not None:
+            chunk = chunk.filter(bits.slice(start, rows))
+        if len(chunk):
+            _hash_values(values.take(chunk), None, digest)
+
+
 def _hash_values(arr: pa.Array, bits: pa.Array | None, digest) -> None:
     """Section 3.2 leaf value bytes of the elements of `arr` whose bit in `bits` is 1.
 
     Works in bounded chunks: the valid values are never materialized as a whole.
     """
+    if pa.types.is_dictionary(arr.type):
+        _hash_dictionary_values(arr, bits, digest)
+        return
     t = arr.type
     n = len(arr)
     if pa.types.is_boolean(t):
@@ -456,43 +555,21 @@ def _hash_values(arr: pa.Array, bits: pa.Array | None, digest) -> None:
                 raw = memoryview(chunk.buffers()[1])
                 digest.update(raw[chunk.offset * width:(chunk.offset + len(chunk)) * width])
         return
-    if pa.types.is_string(t) or pa.types.is_large_string(t) or pa.types.is_binary(t) or pa.types.is_large_binary(t):
+    if _is_var_length(t):
         if n == 0:
             return
-        large = pa.types.is_large_string(t) or pa.types.is_large_binary(t)
-        size = 8 if large else 4
-        bufs = arr.buffers()
-        offsets = memoryview(bufs[1])[arr.offset * size:(arr.offset + n + 1) * size].cast("q" if large else "i")
-        data = memoryview(bufs[2]) if bufs[2] is not None else memoryview(b"")
-        # Nulls are skipped while reading the original buffers. Small values are joined
-        # into updates of about _BYTE_BUDGET bytes; a value of at least that size is fed
-        # straight from the data buffer (no copy).
-        parts: list = []
-        pending = 0
-        pack = _U64.pack
+        offsets, data = _var_length_buffers(arr)
+        feeder = _VarLengthFeeder(digest)
+        # Nulls are skipped while reading the original buffers (no copy of the payload).
         for chunk_start in range(0, n, _CHUNK):
             chunk_end = min(chunk_start + _CHUNK, n)
-            offs = offsets[chunk_start:chunk_end + 1].tolist()
+            offs = offsets[arr.offset + chunk_start:arr.offset + chunk_end + 1].tolist()
             pairs = zip(offs, offs[1:], strict=False)  # consecutive offsets
             if bits is not None:
                 flags = bits.slice(chunk_start, chunk_end - chunk_start).to_pylist()
                 pairs = (pair for pair, ok in zip(pairs, flags, strict=True) if ok)
-            for a, b in pairs:
-                size_i = b - a
-                if size_i >= _BYTE_BUDGET:
-                    parts.append(pack(size_i))
-                    digest.update(b"".join(parts))
-                    digest.update(data[a:b])
-                    parts, pending = [], 0
-                    continue
-                parts.append(pack(size_i))
-                parts.append(data[a:b])
-                pending += 8 + size_i
-                if pending >= _BYTE_BUDGET:
-                    digest.update(b"".join(parts))
-                    parts, pending = [], 0
-        if parts:
-            digest.update(b"".join(parts))
+            _feed_var_length(feeder, data, pairs)
+        feeder.flush()
         return
     raise ValueError(f"Hashing data of type {t} is not supported")  # checked earlier (Section 7)
 
@@ -515,7 +592,7 @@ def _visit(
     """
     arr = _resolve(arr)
     entry = entries[path]
-    own = arr.is_valid() if arr.null_count else None
+    own = _logical_validity(arr)
     if own is not None and not field.nullable:
         # Section 7 item 4: a null in a non-nullable node not masked by an enclosing struct
         # null (elements outside `select` are not elements and are ignored).
