@@ -81,6 +81,12 @@ def _flags(ordered_columns: bool, ordered_struct_fields: bool, nested_validity: 
     )
 
 
+def _reject_nested_validity(nested_validity: bool) -> None:
+    """Format 2 has no third option: its layout is always lossless (spec format 2, §1)."""
+    if nested_validity:
+        raise TypeError("nested_validity is not an option in hash format 2 (its layout is always lossless)")
+
+
 def _lossless(flags: int) -> bool:
     """Whether the lossless layout of spec 9.5 / 9.5.1 applies."""
     return _LOSSLESS_BY_DEFAULT or bool(flags & _NESTED_VALIDITY)
@@ -1078,6 +1084,18 @@ class ArrowDigester:
         Raises:
             ValueError: With any option on, if ``schema`` is rejected (spec 9.6).
         """
+        if _FORMAT_2:
+            _reject_nested_validity(nested_validity)
+            from starfix import _format2
+
+            self._format2 = _format2.Digester(
+                schema,
+                include_metadata=include_metadata,
+                ordered_columns=ordered_columns,
+                ordered_struct_fields=ordered_struct_fields,
+            )
+            return
+        self._format2 = None
         flags = _flags(ordered_columns, ordered_struct_fields, nested_validity)
         if flags:
             _check_schema_node_paths(schema)
@@ -1105,6 +1123,9 @@ class ArrowDigester:
                 (spec 9.6) or does not match the digester's schema under its
                 options (spec 9.7).
         """
+        if self._format2 is not None:
+            self._format2.update(record_batch)
+            return
         schema = record_batch.schema
         if self._flags:
             _check_schema_node_paths(schema)
@@ -1128,6 +1149,8 @@ class ArrowDigester:
 
     def finalize(self) -> bytes:
         """Consume the digester and return the versioned hash (spec Section 5)."""
+        if self._format2 is not None:
+            return self._format2.finalize()
         final_digest = hashlib.sha256()
         final_digest.update(self._schema_digest)
         for _path, entry in sorted(self._fields.items()):
@@ -1173,6 +1196,16 @@ class ArrowDigester:
         Raises:
             ValueError: With any option on, if ``schema`` is rejected (spec 9.6).
         """
+        if _FORMAT_2:
+            _reject_nested_validity(nested_validity)
+            from starfix import _format2
+
+            return _format2.hash_schema(
+                schema,
+                include_metadata=include_metadata,
+                ordered_columns=ordered_columns,
+                ordered_struct_fields=ordered_struct_fields,
+            )
         flags = _flags(ordered_columns, ordered_struct_fields, nested_validity)
         if flags:
             _check_schema_node_paths(schema)
@@ -1310,6 +1343,13 @@ class ArrowDigester:
         """
         import pyarrow as pa
 
+        if _FORMAT_2:
+            _reject_nested_validity(nested_validity)
+            from starfix import _format2
+
+            return _format2.hash_array(
+                array, ordered_columns=ordered_columns, ordered_struct_fields=ordered_struct_fields
+            )
         flags = _flags(ordered_columns, ordered_struct_fields, nested_validity)
         nv = _lossless(flags)
 

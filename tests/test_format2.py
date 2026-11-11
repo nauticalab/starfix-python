@@ -1,0 +1,539 @@
+"""Hash format 2 (ITL-898), checked byte for byte against the specification.
+
+Spec: ``nauticalab/starfix docs/byte-layout-spec.md`` (format 2, commit 041b8f1). Every
+expected value is built here from the literal SHA-256 inputs in the spec, or is a final
+hash the spec prints; never from the implementation under test. Cross-language values are
+pinned separately by the Rust golden file once it lands.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import struct
+
+import pyarrow as pa
+import pytest
+
+from starfix import _format2 as f2
+
+V = b"\x00\x00\x02"
+
+
+def header(flags: int) -> bytes:
+    return bytes.fromhex("00 73 74 61 72 66 69 78 00 00 02".replace(" ", "")) + bytes([flags])
+
+
+def sha(*parts: bytes) -> bytes:
+    h = hashlib.sha256()
+    for p in parts:
+        h.update(p)
+    return h.digest()
+
+
+def u64(n: int) -> bytes:
+    return struct.pack("<Q", n)
+
+
+def i32(*vals: int) -> bytes:
+    return b"".join(struct.pack("<i", v) for v in vals)
+
+
+# ── Section 1: header ──────────────────────────────────────────────────
+
+
+def test_header_bytes() -> None:
+    assert f2.header(0x03) == header(0x03)
+    assert len(f2.header(0)) == 12
+    assert f2.VERSION_BYTES == V
+
+
+# ── Section 2.1: canonical type JSON examples with printed hashes ───────
+
+
+def test_map_example() -> None:
+    value = pa.struct([pa.field("z", pa.int32(), nullable=False), pa.field("a", pa.int32(), nullable=False)])
+    schema = pa.schema([pa.field("m", pa.map_(pa.utf8(), pa.field("value", value, nullable=True)), nullable=True)])
+    json_ = (
+        b'{"m":{"data_type":{"Map":{"key":{"data_type":"LargeUtf8","nullable":false},"keys_sorted":false,'
+        b'"value":{"data_type":{"Struct":[{"data_type":"Int32","name":"a","nullable":false},'
+        b'{"data_type":"Int32","name":"z","nullable":false}]},"nullable":true}}},"nullable":true}}'
+    )
+    expected = "0000021c34e18fc2130624f527774ee7992b42234963037109d81715bbacd180adcf1f"
+    assert (V + sha(header(0), json_)).hex() == expected
+    assert f2.hash_schema(schema).hex() == expected
+
+
+def test_fixed_size_list_example() -> None:
+    schema = pa.schema([pa.field("f", pa.list_(pa.field("item", pa.int32(), nullable=True), 2), nullable=False)])
+    expected = "000002e04a62c05b99b0fce4b391ba58561f4a9df1e92319baaf3644496ad6e4209dcc"
+    json_ = b'{"f":{"data_type":{"FixedSizeList":[{"data_type":"Int32","nullable":true},2]},"nullable":false}}'
+    assert (V + sha(header(0), json_)).hex() == expected
+    assert f2.hash_schema(schema).hex() == expected
+
+
+def test_hash_array_non_ascii_example() -> None:
+    arr = pa.StructArray.from_arrays([pa.array([1], pa.int32())], fields=[pa.field("é", pa.int32(), nullable=False)])
+    expected = "000002cf1133b1070ab1b15f56e2013e4c4fe7a560d94d359c07868c42e4cfadfbe728"
+    assert f2.hash_array(arr).hex() == expected
+
+
+def test_json_text_rules() -> None:
+    schema = pa.schema([pa.field("a\nb\x1b/\x7f\"\\é", pa.int8(), nullable=False)])
+    name = '"a\\nb\\u001b/\x7f\\"\\\\é"'.encode()
+    json_ = b"{" + name + b':{"data_type":"Int8","nullable":false}}'
+    assert f2.hash_schema(schema) == V + sha(header(0), json_)
+
+
+@pytest.mark.parametrize(
+    "factory, form",
+    [
+        (lambda: pa.null(), '"Null"'),
+        (lambda: pa.bool_(), '"Boolean"'),
+        (lambda: pa.int8(), '"Int8"'),
+        (lambda: pa.uint64(), '"UInt64"'),
+        (lambda: pa.float16(), '"Float16"'),
+        (lambda: pa.date64(), '"Date64"'),
+        (lambda: pa.time32("s"), '{"Time32":"Second"}'),
+        (lambda: pa.time64("ns"), '{"Time64":"Nanosecond"}'),
+        (lambda: pa.timestamp("us", tz="UTC"), '{"Timestamp":["Microsecond","UTC"]}'),
+        (lambda: pa.timestamp("s"), '{"Timestamp":["Second",null]}'),
+        (lambda: pa.timestamp("ms", tz="+05:30"), '{"Timestamp":["Millisecond","+05:30"]}'),
+        (lambda: pa.duration("ms"), '{"Duration":"Millisecond"}'),
+        (lambda: pa.month_day_nano_interval(), '{"Interval":"MonthDayNano"}'),
+        (lambda: pa.decimal128(38, 10), '{"Decimal128":[38,10]}'),
+        (lambda: pa.decimal256(40, -3), '{"Decimal256":[40,-3]}'),
+        (lambda: pa.binary(16), '{"FixedSizeBinary":16}'),
+        (lambda: pa.utf8(), '"LargeUtf8"'),
+        (lambda: pa.large_binary(), '"LargeBinary"'),
+        (lambda: pa.dictionary(pa.int8(), pa.utf8(), ordered=True), '"LargeUtf8"'),
+        (lambda: pa.list_(pa.field("element", pa.int8(), nullable=False)),
+         '{"LargeList":{"data_type":"Int8","nullable":false}}'),
+    ],
+)
+def test_primitive_and_canonical_forms(factory, form) -> None:
+    schema = pa.schema([pa.field("c", factory(), nullable=True)])
+    json_ = ('{"c":{"data_type":' + form + ',"nullable":true}}').encode()
+    assert f2.hash_schema(schema) == V + sha(header(0), json_)
+
+
+# ── Section 9: worked examples ─────────────────────────────────────────
+
+
+def test_example_1_record_batch() -> None:
+    schema = pa.schema([pa.field("a", pa.int32(), nullable=False), pa.field("b", pa.large_utf8(), nullable=True)])
+    batch = pa.record_batch([pa.array([1, 2], pa.int32()), pa.array(["x", None], pa.large_utf8())], schema=schema)
+    schema_digest = sha(
+        header(0), b'{"a":{"data_type":"Int32","nullable":false},"b":{"data_type":"LargeUtf8","nullable":true}}'
+    )
+    final = sha(
+        schema_digest,
+        u64(2),
+        sha(i32(1, 2)),
+        u64(2) + b"\x01",
+        sha(u64(1) + b"x"),
+    )
+    assert (V + final).hex() == "00000232bdf93232887698a4ec193cd978e6617c3d64a85be5d26c2853fcf82a42f3b6"
+    assert f2.hash_record_batch(batch) == V + final
+
+
+def test_example_2_list() -> None:
+    t = pa.list_(pa.field("item", pa.int32(), nullable=True))
+    schema = pa.schema([pa.field("c", t, nullable=True)])
+    batch = pa.record_batch([pa.array([[1, None], None, []], t)], schema=schema)
+    final = sha(
+        f2.hash_schema(schema)[3:],
+        u64(3),
+        u64(3) + b"\x05",
+        sha(u64(2) + u64(0)),
+        u64(2) + b"\x01",
+        sha(i32(1)),
+    )
+    assert f2.hash_record_batch(batch) == V + final
+
+
+def test_example_3_nullable_struct() -> None:
+    s = pa.StructArray.from_arrays(
+        [pa.array([5, None, 1], pa.int32())],
+        fields=[pa.field("a", pa.int32(), nullable=True)],
+        mask=pa.array([True, False, False]),
+    )
+    schema = pa.schema([pa.field("s", s.type, nullable=True)])
+    batch = pa.record_batch([s], schema=schema)
+    final = sha(
+        f2.hash_schema(schema)[3:],
+        u64(3),
+        u64(3) + b"\x06",
+        u64(3) + b"\x04",
+        sha(i32(1)),
+    )
+    assert f2.hash_record_batch(batch) == V + final
+
+
+def test_example_4_list_of_nullable_struct() -> None:
+    st = pa.struct([pa.field("a", pa.int32(), nullable=True)])
+    t = pa.list_(pa.field("item", st, nullable=True))
+    schema = pa.schema([pa.field("l", t, nullable=False)])
+    batch = pa.record_batch([pa.array([[None, {"a": 4}]], t)], schema=schema)
+    final = sha(
+        f2.hash_schema(schema)[3:],
+        u64(1),
+        sha(u64(2)),  # "l": lengths
+        u64(2) + b"\x02",  # "l/": validity [0,1]
+        # "l//a" is nullable: validity [0,1] (struct null ANDed), values [4]
+        u64(2) + b"\x02",
+        sha(i32(4)),
+    )
+    assert f2.hash_record_batch(batch) == V + final
+
+
+def test_example_4_as_printed_with_non_nullable_child() -> None:
+    """The spec prints "l//a" without validity: the child a is then non-nullable."""
+    st = pa.struct([pa.field("a", pa.int32(), nullable=False)])
+    t = pa.list_(pa.field("item", st, nullable=True))
+    schema = pa.schema([pa.field("l", t, nullable=False)])
+    arr = pa.ListArray.from_arrays(
+        pa.array([0, 2], pa.int32()),
+        pa.StructArray.from_arrays([pa.array([0, 4], pa.int32())], fields=list(st), mask=pa.array([True, False])),
+    ).cast(t)
+    batch = pa.record_batch([arr], schema=schema)
+    final = sha(f2.hash_schema(schema)[3:], u64(1), sha(u64(2)), u64(2) + b"\x02", sha(i32(4)))
+    assert f2.hash_record_batch(batch) == V + final
+
+
+def test_example_5_hash_array() -> None:
+    expected = V + sha(header(0), b'"Int32"', u64(3), sha(i32(1, 2, 3)))
+    assert expected.hex() == "0000024c470976f10386fad05c0ef8ac4d3f82c4fd656c3ea6255ef8a21180ce53597a"
+    assert f2.hash_array(pa.array([1, 2, 3], pa.int32())) == expected
+    boolean = V + sha(header(0), b'"Boolean"', u64(3), u64(3) + b"\x05", sha(b"\x01\x00"))
+    assert f2.hash_array(pa.array([True, None, False])) == boolean
+
+
+def test_example_6_options() -> None:
+    schema = pa.schema([pa.field("b", pa.int32(), nullable=False), pa.field("a", pa.utf8(), nullable=True)])
+    json_ = (
+        b'[{"data_type":"Int32","name":"b","nullable":false},'
+        b'{"data_type":"LargeUtf8","name":"a","nullable":true}]'
+    )
+    assert f2.hash_schema(schema, ordered_columns=True) == V + sha(header(0x01), json_)
+
+
+def test_example_7_zero_columns() -> None:
+    batch = pa.RecordBatch.from_struct_array(pa.array([{}, {}, {}], pa.struct([])))
+    assert batch.num_columns == 0 and batch.num_rows == 3
+    assert f2.hash_record_batch(batch) == V + sha(sha(header(0), b"{}"), u64(3))
+
+
+# ── Sections 2.3, 2.4: metadata and names not hashed ───────────────────
+
+
+def test_phase2_map_value_metadata_path() -> None:
+    value = pa.field("value", pa.int32(), metadata={"unit": "kg"})
+    schema = pa.schema([pa.field("m", pa.map_(pa.utf8(), value), nullable=True)])
+    phase1 = (
+        b'{"m":{"data_type":{"Map":{"key":{"data_type":"LargeUtf8","nullable":false},"keys_sorted":false,'
+        b'"value":{"data_type":"Int32","nullable":true}}},"nullable":true}}'
+    )
+    assert f2.hash_schema(schema, include_metadata=True) == V + sha(
+        header(0), phase1, b'{"fields":{"m//value":{"unit":"kg"}}}'
+    )
+
+
+def test_phase2_paths_and_schema_metadata() -> None:
+    st = pa.struct([pa.field("x", pa.int8(), metadata={"k": "1"})])
+    lt = pa.list_(pa.field("element", pa.int8(), metadata={"e": "2"}))
+    schema = pa.schema(
+        [pa.field("s", st, metadata={"c": "3"}), pa.field("l", lt), pa.field("d", pa.dictionary(pa.int8(), st))],
+        metadata={"z": "9", "a": "0"},
+    )
+    expected_phase2 = (
+        b'{"fields":{"d/x":{"k":"1"},"l/":{"e":"2"},"s":{"c":"3"},"s/x":{"k":"1"}},"schema":{"a":"0","z":"9"}}'
+    )
+    phase1 = f2.phase1_json(schema, 0).encode()
+    assert f2.hash_schema(schema, include_metadata=True) == V + sha(header(0), phase1, expected_phase2)
+
+
+def test_include_metadata_without_metadata_is_invariant() -> None:
+    schema = pa.schema([pa.field("a", pa.int32())])
+    assert f2.hash_schema(schema, include_metadata=True) == f2.hash_schema(schema)
+
+
+@pytest.mark.parametrize(
+    "left, right",
+    [
+        (pa.list_(pa.field("item", pa.int8())), pa.list_(pa.field("element", pa.int8()))),
+        (pa.dictionary(pa.int8(), pa.utf8()), pa.dictionary(pa.int32(), pa.utf8(), ordered=True)),
+        (pa.utf8(), pa.large_utf8()),
+        (pa.binary(), pa.large_binary()),
+        (pa.list_(pa.int8()), pa.large_list(pa.int8())),
+    ],
+)
+def test_names_and_physical_variants_not_hashed(left, right) -> None:
+    assert f2.hash_schema(pa.schema([pa.field("c", left)])) == f2.hash_schema(pa.schema([pa.field("c", right)]))
+
+
+# ── Sections 3, 4: data layout rules ────────────────────────────────────
+
+
+def test_non_nullable_child_of_null_struct_contributes_nothing() -> None:
+    """Spec 3.2: elements whose (AND-ed) bit is 0 contribute no values (pending E2)."""
+    s = pa.StructArray.from_arrays(
+        [pa.array([1, 2, 3], pa.int32())],
+        fields=[pa.field("a", pa.int32(), nullable=False)],
+        mask=pa.array([False, True, False]),
+    )
+    schema = pa.schema([pa.field("s", s.type, nullable=True)])
+    batch = pa.record_batch([s], schema=schema)
+    final = sha(f2.hash_schema(schema)[3:], u64(3), u64(3) + b"\x05", sha(i32(1, 3)))
+    assert f2.hash_record_batch(batch) == V + final
+
+
+def test_row_count_distinguishes_empty_structs() -> None:
+    def batch(n):
+        return pa.RecordBatch.from_arrays([pa.array([{}] * n, pa.struct([]))], names=["s"])
+
+    assert f2.hash_record_batch(batch(0)) != f2.hash_record_batch(batch(3))
+
+
+def test_entry_order_is_bytewise_node_path_order() -> None:
+    schema = pa.schema([pa.field("b", pa.int8(), nullable=False), pa.field("a", pa.int8(), nullable=False)])
+    batch = pa.record_batch([pa.array([1], pa.int8()), pa.array([2], pa.int8())], schema=schema)
+    final = sha(f2.hash_schema(schema)[3:], u64(1), sha(b"\x02"), sha(b"\x01"))
+    assert f2.hash_record_batch(batch) == V + final
+
+
+def test_leaf_value_bytes() -> None:
+    cases = [
+        (pa.array([1.5], pa.float64()), struct.pack("<d", 1.5)),
+        (pa.array([-1], pa.int16()), struct.pack("<h", -1)),
+        (pa.array([b"ab"], pa.binary()), u64(2) + b"ab"),
+        (pa.array(["é"], pa.utf8()), u64(2) + "é".encode()),
+        (pa.array([True, False], pa.bool_()), b"\x01\x00"),
+        (pa.array([b"\x01\x02"], pa.binary(2)), b"\x01\x02"),
+        (pa.array(["q", "p", "q"]).dictionary_encode(), u64(1) + b"q" + u64(1) + b"p" + u64(1) + b"q"),
+        (pa.array([10, 20, 10], pa.int64()).dictionary_encode(), struct.pack("<qqq", 10, 20, 10)),
+    ]
+    for arr, value_bytes in cases:
+        t = arr.type.value_type if pa.types.is_dictionary(arr.type) else arr.type
+        type_json = f2.type_json(t, 0).encode()
+        expected = V + sha(header(0), type_json, u64(len(arr)), sha(value_bytes))
+        assert f2.hash_array(arr) == expected, arr.type
+
+
+def test_hash_array_root_struct_nullable_and_list() -> None:
+    s = pa.StructArray.from_arrays([pa.array([1, 2], pa.int8())], fields=[pa.field("x", pa.int8(), nullable=False)],
+                                   mask=pa.array([False, True]))
+    type_json = b'{"Struct":[{"data_type":"Int8","name":"x","nullable":false}]}'
+    assert f2.hash_array(s) == V + sha(header(0), type_json, u64(2), u64(2) + b"\x01", sha(b"\x01"))
+    lst = pa.array([[1, 2], [3]], pa.list_(pa.field("item", pa.int8(), nullable=False)))
+    type_json = b'{"LargeList":{"data_type":"Int8","nullable":false}}'
+    assert f2.hash_array(lst) == V + sha(header(0), type_json, u64(2), sha(u64(2) + u64(1)), sha(b"\x01\x02\x03"))
+
+
+def test_hash_array_ordered_columns_changes_only_the_header() -> None:
+    arr = pa.array([1], pa.int8())
+    assert f2.hash_array(arr, ordered_columns=True) == V + sha(header(0x01), b'"Int8"', u64(1), sha(b"\x01"))
+
+
+# ── Invariants (Section 11) ─────────────────────────────────────────────
+
+
+def _mixed_batch() -> pa.RecordBatch:
+    st = pa.struct([pa.field("z", pa.int32()), pa.field("a", pa.list_(pa.bool_()))])
+    s = pa.array([{"z": 1, "a": [True]}, None, {"z": None, "a": None}, {"z": 4, "a": [False, None]}], st)
+    return pa.record_batch(
+        [pa.array(["x", None, "y", "z"]), s, pa.array([[[1]], None, [[2], None], []], pa.list_(pa.list_(pa.int64())))],
+        names=["b", "s", "l"],
+    )
+
+
+def test_i1_order_options() -> None:
+    batch = _mixed_batch()
+    reordered = batch.select([2, 1, 0])
+    assert f2.hash_record_batch(batch) == f2.hash_record_batch(reordered)
+    assert f2.hash_record_batch(batch, ordered_columns=True) != f2.hash_record_batch(reordered, ordered_columns=True)
+    st_xy = pa.StructArray.from_arrays([pa.array([1]), pa.array([2])], names=["x", "y"])
+    st_yx = pa.StructArray.from_arrays([pa.array([2]), pa.array([1])], names=["y", "x"])
+    assert f2.hash_array(st_xy) == f2.hash_array(st_yx)
+    assert f2.hash_array(st_xy, ordered_struct_fields=True) != f2.hash_array(st_yx, ordered_struct_fields=True)
+
+
+def test_i2_flag_values_never_coincide() -> None:
+    batch = pa.record_batch([pa.array([1])], names=["a"])
+    hashes = {
+        f2.hash_record_batch(batch, ordered_columns=oc, ordered_struct_fields=osf)
+        for oc in (False, True) for osf in (False, True)
+    }
+    assert len(hashes) == 4
+
+
+def test_i4_batch_split_slicing_and_empty_batches() -> None:
+    batch = _mixed_batch()
+    whole = f2.hash_record_batch(batch)
+    d = f2.Digester(batch.schema)
+    d.update(batch.slice(0, 0))
+    d.update(batch.slice(0, 1))
+    d.update(batch.slice(1, 2))
+    d.update(batch.slice(3))
+    assert d.finalize() == whole
+    assert f2.hash_table(pa.Table.from_batches([batch.slice(0, 3), batch.slice(3)])) == whole
+    # adding a row changes the hash
+    longer = pa.Table.from_batches([batch, batch.slice(0, 1)]).combine_chunks().to_batches()[0]
+    assert f2.hash_record_batch(longer) != whole
+
+
+def test_i3_physical_equivalence_in_data() -> None:
+    small = pa.record_batch([pa.array([["a"], None], pa.list_(pa.utf8()))], names=["c"])
+    large = pa.record_batch([pa.array([["a"], None], pa.large_list(pa.large_utf8()))], names=["c"])
+    assert f2.hash_record_batch(small) == f2.hash_record_batch(large)
+
+
+# ── Section 7: rejected inputs (every mode) ─────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        pa.schema([pa.field("a", pa.int8()), pa.field("a", pa.int8())]),
+        pa.schema([pa.field("s", pa.struct([pa.field("x", pa.int8()), pa.field("x", pa.int8())]))]),
+        pa.schema([pa.field("a/b", pa.int8()), pa.field("a", pa.struct([pa.field("b", pa.int8())]))]),
+        pa.schema([pa.field("x", pa.list_(pa.int8())), pa.field("x/", pa.int8())]),
+        pa.schema([pa.field("m", pa.map_(pa.utf8(), pa.int8())), pa.field("m//key", pa.int8())]),
+        pa.schema([pa.field("u", pa.dense_union([pa.field("a", pa.int8())]))]),
+        pa.schema([pa.field("r", pa.run_end_encoded(pa.int32(), pa.int8()))]),
+    ],
+    ids=["dup_columns", "dup_children", "slash_alias", "list_alias", "map_alias", "union", "ree"],
+)
+def test_rejected_schemas(schema) -> None:
+    with pytest.raises(ValueError):
+        f2.hash_schema(schema)
+    with pytest.raises(ValueError):
+        f2.Digester(schema)
+
+
+def test_list_view_rejected() -> None:
+    if not hasattr(pa, "list_view"):
+        pytest.skip("pyarrow without list_view")
+    with pytest.raises(ValueError):
+        f2.hash_schema(pa.schema([pa.field("v", pa.list_view(pa.int8()))]))
+
+
+def test_slash_aliasing_nothing_is_accepted() -> None:
+    f2.hash_schema(pa.schema([pa.field("km/h", pa.float64()), pa.field("km", pa.int8())]))
+
+
+def test_hash_array_root_path_is_claimed() -> None:
+    arr = pa.StructArray.from_arrays([pa.array([1])], fields=[pa.field("", pa.int64())])
+    with pytest.raises(ValueError):
+        f2.hash_array(arr)
+
+
+# ── Section 5: per-batch schema check ──────────────────────────────────
+
+
+def test_streaming_check() -> None:
+    schema = pa.schema([pa.field("a", pa.int32()), pa.field("b", pa.utf8())])
+    reordered = pa.record_batch([pa.array(["x"]), pa.array([1], pa.int32())], names=["b", "a"])
+    f2.Digester(schema).update(reordered)
+    with pytest.raises(ValueError, match="does not match"):
+        f2.Digester(schema, ordered_columns=True).update(reordered)
+    with pytest.raises(ValueError, match="does not match"):
+        f2.Digester(schema).update(pa.record_batch([pa.array([1], pa.int64()), pa.array(["x"])], names=["a", "b"]))
+    large = pa.record_batch([pa.array([1], pa.int32()), pa.array(["x"], pa.large_utf8())], names=["a", "b"])
+    f2.Digester(schema).update(large)
+    meta = pa.schema([pa.field("a", pa.int32(), metadata={"k": "v"}), pa.field("b", pa.utf8())])
+    batch = pa.record_batch([pa.array([1], pa.int32()), pa.array(["x"])], schema=meta)
+    f2.Digester(schema).update(batch)  # metadata ignored without include_metadata
+    with pytest.raises(ValueError, match="does not match"):
+        f2.Digester(schema, include_metadata=True).update(batch)
+
+
+# ── Section 8: unsupported data ─────────────────────────────────────────
+
+
+def test_unsupported_data_raises() -> None:
+    batch = pa.record_batch([pa.array([None, None], pa.null())], names=["n"])
+    f2.hash_schema(batch.schema)
+    with pytest.raises(NotImplementedError):
+        f2.hash_record_batch(batch)
+
+
+# ── Section 2.3: extension types (E1 pending for pyarrow's C++ built-in types) ──
+
+
+class _Point(pa.ExtensionType):
+    def __init__(self, unit: str = "m") -> None:
+        self.unit = unit
+        super().__init__(pa.struct([pa.field("x", pa.float64())]), "starfix.test.point")
+
+    def __arrow_ext_serialize__(self) -> bytes:
+        return ('{"unit":"%s"}' % self.unit).encode()
+
+    @classmethod
+    def __arrow_ext_deserialize__(cls, storage_type, serialized):
+        import json as _json
+
+        return cls(_json.loads(serialized)["unit"])
+
+
+@pytest.fixture
+def point_type():
+    pa.register_extension_type(_Point())
+    yield _Point
+    pa.unregister_extension_type("starfix.test.point")
+
+
+def _ipc_roundtrip(schema: pa.Schema, batches=()) -> tuple[pa.Schema, list]:
+    import io
+
+    sink = io.BytesIO()
+    with pa.ipc.new_stream(sink, schema) as w:
+        for b in batches:
+            w.write_batch(b)
+    reader = pa.ipc.open_stream(io.BytesIO(sink.getvalue()))
+    return reader.schema, list(reader)
+
+
+def test_registered_python_extension_type(point_type) -> None:
+    storage = pa.struct([pa.field("x", pa.float64())])
+    schema = pa.schema([pa.field("p", point_type("km"), metadata={"other": "x"})])
+    phase1 = b'{"p":{"data_type":{"Struct":[{"data_type":"Float64","name":"x","nullable":true}]},"nullable":true}}'
+    phase2 = b'{"fields":{"p":{"ARROW:extension:metadata":"{\\"unit\\":\\"km\\"}","ARROW:extension:name":"starfix.test.point","other":"x"}}}'
+    assert f2.hash_schema(schema, include_metadata=True) == V + sha(header(0), phase1, phase2)
+    # Without include_metadata an extension type hashes exactly like its storage type.
+    assert f2.hash_schema(schema) == f2.hash_schema(pa.schema([pa.field("p", storage)]))
+    # Data: the storage array is hashed.
+    storage_arr = pa.array([{"x": 1.0}, None], storage)
+    ext_arr = pa.ExtensionArray.from_storage(point_type("km"), storage_arr)
+    plain = pa.record_batch([storage_arr], names=["p"])
+    ext = pa.record_batch([ext_arr], names=["p"])
+    assert f2.hash_record_batch(ext) == f2.hash_record_batch(plain)
+    assert f2.hash_array(ext_arr) == f2.hash_array(storage_arr)
+
+
+def test_registered_python_extension_type_after_ipc(point_type) -> None:
+    """pyarrow hides the two keys of a registered type; they are re-added from the type."""
+    stored = pa.schema([pa.field("p", pa.struct([pa.field("x", pa.float64())]), metadata={
+        "ARROW:extension:name": "starfix.test.point", "ARROW:extension:metadata": '{"unit":"km"}'})])
+    seen, _ = _ipc_roundtrip(stored)
+    assert isinstance(seen.field(0).type, point_type)
+    assert f2.hash_schema(seen, include_metadata=True) == f2.hash_schema(stored, include_metadata=True)
+
+
+def test_unregistered_extension_keys_hashed_verbatim() -> None:
+    schema = pa.schema([pa.field("q", pa.int32(), metadata={
+        "ARROW:extension:name": "other.thing", "ARROW:extension:metadata": "v1"})])
+    seen, _ = _ipc_roundtrip(schema)
+    phase2 = b'{"fields":{"q":{"ARROW:extension:metadata":"v1","ARROW:extension:name":"other.thing"}}}'
+    assert f2.hash_schema(seen, include_metadata=True) == V + sha(header(0), b'{"q":{"data_type":"Int32","nullable":true}}', phase2)
+
+
+def test_builtin_uuid_extension_with_canonical_metadata() -> None:
+    """arrow.uuid stored with an empty metadata value: exact (E1 covers other stored forms)."""
+    if not hasattr(pa, "uuid"):
+        pytest.skip("pyarrow without a registered arrow.uuid")
+    stored = pa.schema([pa.field("u", pa.binary(16), metadata={
+        "ARROW:extension:name": "arrow.uuid", "ARROW:extension:metadata": ""})])
+    batch = pa.record_batch([pa.array([b"\x01" * 16, None], pa.binary(16))], schema=stored)
+    seen, batches = _ipc_roundtrip(stored, [batch])
+    assert f2.hash_schema(seen, include_metadata=True) == f2.hash_schema(stored, include_metadata=True)
+    assert f2.hash_record_batch(batches[0]) == f2.hash_record_batch(batch)

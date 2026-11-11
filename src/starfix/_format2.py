@@ -1,0 +1,552 @@
+"""Hash format 2 of the starfix Arrow logical hasher (ITL-898, provisional).
+
+Implements ``nauticalab/starfix docs/byte-layout-spec.md`` (format 2) from the
+specification alone. Section numbers below refer to that document.
+
+Pending spec decisions (marked ``PENDING`` in the code): E1 extension metadata of types
+pyarrow registers in C++; E2/E3 nulls in non-nullable nodes; E4 unsupported data types
+with zero rows; E5/E6 nested dictionary and extension values.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import struct
+from typing import TYPE_CHECKING, Any
+
+import pyarrow as pa
+import pyarrow.compute as pc
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+FORMAT = 2
+VERSION_BYTES = FORMAT.to_bytes(3, "big")  # Section 1: 24-bit big-endian format number
+_HEADER_PREFIX = b"\x00starfix" + VERSION_BYTES
+
+ORDERED_COLUMNS = 0x01
+ORDERED_STRUCT_FIELDS = 0x02
+
+_SCHEMA_MISMATCH = "Record batch schema does not match ArrowDigester schema"
+_U64 = struct.Struct("<Q")
+_CHUNK = 1 << 16  # elements per chunk when serializing values (bounds temporary memory)
+
+
+def flags_of(ordered_columns: bool, ordered_struct_fields: bool) -> int:
+    return (ORDERED_COLUMNS if ordered_columns else 0) | (ORDERED_STRUCT_FIELDS if ordered_struct_fields else 0)
+
+
+def header(flags: int) -> bytes:
+    """Section 1: 0x00 || "starfix" || version || flags (12 bytes)."""
+    return _HEADER_PREFIX + bytes([flags])
+
+
+def _json(value: Any) -> str:
+    """Section 2.1 JSON text rules (serde_json compact form; keys sorted by code point)."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
+
+
+# ---------------------------------------------------------------------------
+# Types: unwrapping, rejection, canonical JSON (Sections 2.1, 7)
+# ---------------------------------------------------------------------------
+
+def _is_extension(t: pa.DataType) -> bool:
+    return isinstance(t, pa.BaseExtensionType)
+
+
+def _logical(t: pa.DataType) -> pa.DataType:
+    """Extension -> storage type, dictionary -> value type (repeatedly)."""
+    while True:
+        if _is_extension(t):
+            t = t.storage_type
+        elif pa.types.is_dictionary(t):
+            t = t.value_type
+        else:
+            return t
+
+
+def _is_rejected_type(t: pa.DataType) -> bool:
+    checks = ("is_list_view", "is_large_list_view", "is_union", "is_run_end_encoded")
+    return any(getattr(pa.types, name, lambda _t: False)(t) for name in checks)
+
+
+def _is_list(t: pa.DataType) -> bool:
+    return pa.types.is_list(t) or pa.types.is_large_list(t)
+
+
+_UNITS = {"s": "Second", "ms": "Millisecond", "us": "Microsecond", "ns": "Nanosecond"}
+_INTERVALS = {"month_interval": "YearMonth", "day_time_interval": "DayTime", "month_day_nano_interval": "MonthDayNano"}
+_SIMPLE = {
+    "null": "Null", "bool": "Boolean",
+    "int8": "Int8", "int16": "Int16", "int32": "Int32", "int64": "Int64",
+    "uint8": "UInt8", "uint16": "UInt16", "uint32": "UInt32", "uint64": "UInt64",
+    "halffloat": "Float16", "float": "Float32", "double": "Float64",
+    "date32[day]": "Date32", "date64[ms]": "Date64",
+    "string": "LargeUtf8", "large_string": "LargeUtf8", "binary": "LargeBinary", "large_binary": "LargeBinary",
+    "string_view": "Utf8View", "binary_view": "BinaryView",
+}
+
+
+def type_value(t: pa.DataType, flags: int) -> Any:
+    """The canonical type JSON value of `t` (Section 2.1)."""
+    t = _logical(t)
+    if _is_rejected_type(t):
+        raise ValueError(f"Unsupported Arrow type for hashing: {t}")
+    if pa.types.is_struct(t):
+        children = [t.field(i) for i in range(t.num_fields)]
+        if not flags & ORDERED_STRUCT_FIELDS:
+            children.sort(key=lambda f: f.name)
+        return {"Struct": [_child(c, flags) for c in children]}
+    if _is_list(t):
+        return {"LargeList": _element(t.value_field, flags)}
+    if pa.types.is_fixed_size_list(t):
+        return {"FixedSizeList": [_element(t.value_field, flags), t.list_size]}
+    if pa.types.is_map(t):
+        return {"Map": {
+            "key": _element(t.key_field, flags),
+            "keys_sorted": t.keys_sorted,
+            "value": _element(t.item_field, flags),
+        }}
+    name = str(t)
+    if name in _SIMPLE:
+        return _SIMPLE[name]
+    if name in _INTERVALS:
+        return {"Interval": _INTERVALS[name]}
+    if pa.types.is_time32(t):
+        return {"Time32": _UNITS[t.unit]}
+    if pa.types.is_time64(t):
+        return {"Time64": _UNITS[t.unit]}
+    if pa.types.is_timestamp(t):
+        return {"Timestamp": [_UNITS[t.unit], t.tz]}
+    if pa.types.is_duration(t):
+        return {"Duration": _UNITS[t.unit]}
+    if pa.types.is_decimal(t):
+        return {f"Decimal{t.bit_width}": [t.precision, t.scale]}
+    if pa.types.is_fixed_size_binary(t):
+        return {"FixedSizeBinary": t.byte_width}
+    raise NotImplementedError(f"Unsupported Arrow type for hashing: {t}")
+
+
+def _child(field: pa.Field, flags: int) -> dict:
+    return {"data_type": type_value(field.type, flags), "name": field.name, "nullable": field.nullable}
+
+
+def _element(field: pa.Field, flags: int) -> dict:
+    return {"data_type": type_value(field.type, flags), "nullable": field.nullable}
+
+
+def type_json(t: pa.DataType, flags: int) -> str:
+    return _json(type_value(t, flags))
+
+
+# ---------------------------------------------------------------------------
+# Node paths (Sections 3.1, 7) and Phase 1 / Phase 2 (Sections 2.2, 2.3)
+# ---------------------------------------------------------------------------
+
+def _join(parent: str, name: str) -> str:
+    return f"{parent}/{name}" if parent else name
+
+
+def _children(field_type: pa.DataType, path: str) -> list[tuple[str, pa.Field]]:
+    """The child nodes of a node of this type, as (node path, field)."""
+    t = _logical(field_type)
+    if _is_rejected_type(t):
+        raise ValueError(f"Unsupported Arrow type for hashing: {t}")
+    if pa.types.is_struct(t):
+        return [(_join(path, t.field(i).name), t.field(i)) for i in range(t.num_fields)]
+    if _is_list(t) or pa.types.is_fixed_size_list(t):
+        return [(path + "/", t.value_field)]
+    if pa.types.is_map(t):
+        # Map nodes are p, p/, p//key, p//value; the entries field contributes nothing.
+        return [(path + "//key", t.key_field), (path + "//value", t.item_field)]
+    return []
+
+
+def _walk(root: Iterable[tuple[str, pa.Field]]) -> list[tuple[str, pa.Field]]:
+    """Every node below and including `root`, rejecting duplicate node paths (Section 7)."""
+    seen: set[str] = set()
+    out: list[tuple[str, pa.Field]] = []
+    stack = list(reversed(list(root)))
+    while stack:
+        path, field = stack.pop()
+        claimed = [path]
+        t = _logical(field.type)
+        if pa.types.is_map(t):
+            claimed.append(path + "/")  # the map's element node
+        for p in claimed:
+            if p in seen:
+                raise ValueError(
+                    f"Ambiguous node path {p!r}: two schema nodes share one path "
+                    "(duplicate names, or a name containing '/' that aliases another node)"
+                )
+            seen.add(p)
+        out.append((path, field))
+        stack.extend(reversed(_children(field.type, path)))
+    return out
+
+
+def schema_nodes(schema: pa.Schema) -> list[tuple[str, pa.Field]]:
+    return _walk((schema.field(i).name, schema.field(i)) for i in range(len(schema)))
+
+
+def phase1_json(schema: pa.Schema, flags: int) -> str:
+    """Section 2.2."""
+    fields = [schema.field(i) for i in range(len(schema))]
+    if flags & ORDERED_COLUMNS:
+        return _json([_child(f, flags) for f in fields])
+    return _json({f.name: {"data_type": type_value(f.type, flags), "nullable": f.nullable} for f in fields})
+
+
+def _decode(mapping) -> dict[str, str]:
+    if not mapping:
+        return {}
+    return {
+        (k.decode("utf-8") if isinstance(k, bytes) else k): (v.decode("utf-8") if isinstance(v, bytes) else v)
+        for k, v in mapping.items()
+    }
+
+
+def _extension_metadata(t: pa.DataType) -> dict[str, str]:
+    """ARROW:extension:* keys of a registered extension type (pyarrow hides them).
+
+    PENDING (E1): pyarrow's C++ canonical types have no __arrow_ext_serialize__; their
+    serialized metadata is what pyarrow exports for the type (its canonical
+    serialization), not necessarily the bytes that were stored.
+    """
+    if not _is_extension(t):
+        return {}
+    if hasattr(t, "__arrow_ext_serialize__"):
+        serialized = t.__arrow_ext_serialize__()
+    else:
+        serialized = _exported_extension_metadata(t)
+    return {"ARROW:extension:name": t.extension_name, "ARROW:extension:metadata": serialized.decode("utf-8")}
+
+
+def _exported_extension_metadata(t: pa.DataType) -> bytes:
+    """The serialized metadata pyarrow writes for an extension type (C data interface).
+
+    Exporting a field to the Arrow C data interface (a fixed, documented ABI) carries the
+    ARROW:extension:name / ARROW:extension:metadata keys in ArrowSchema.metadata, encoded
+    as int32 count, then per pair int32 length + key bytes, int32 length + value bytes.
+    """
+    import ctypes
+
+    class _ArrowSchema(ctypes.Structure):
+        pass
+
+    _ArrowSchema._fields_ = [
+        ("format", ctypes.c_char_p),
+        ("name", ctypes.c_char_p),
+        ("metadata", ctypes.c_void_p),
+        ("flags", ctypes.c_int64),
+        ("n_children", ctypes.c_int64),
+        ("children", ctypes.c_void_p),
+        ("dictionary", ctypes.c_void_p),
+        ("release", ctypes.CFUNCTYPE(None, ctypes.c_void_p)),
+        ("private_data", ctypes.c_void_p),
+    ]
+    c_schema = _ArrowSchema()
+    pa.field("x", t)._export_to_c(ctypes.addressof(c_schema))
+    try:
+        pairs: dict[bytes, bytes] = {}
+        if c_schema.metadata:
+            pos = c_schema.metadata
+
+            def read_int32() -> int:
+                nonlocal pos
+                value = ctypes.c_int32.from_address(pos).value
+                pos += 4
+                return value
+
+            def read_bytes(n: int) -> bytes:
+                nonlocal pos
+                value = ctypes.string_at(pos, n)
+                pos += n
+                return value
+
+            for _ in range(read_int32()):
+                key = read_bytes(read_int32())
+                pairs[key] = read_bytes(read_int32())
+        return pairs.get(b"ARROW:extension:metadata", b"")
+    finally:
+        if c_schema.release:
+            c_schema.release(ctypes.addressof(c_schema))
+
+
+def _field_metadata(field: pa.Field) -> dict[str, str]:
+    meta = _decode(field.metadata)
+    meta.update(_extension_metadata(field.type))
+    return meta
+
+
+def phase2_json(schema: pa.Schema) -> str | None:
+    """Section 2.3: metadata keyed by node path; None when there is none."""
+    fields = {}
+    for path, field in schema_nodes(schema):
+        meta = _field_metadata(field)
+        if meta:
+            fields[path] = meta
+    doc: dict[str, Any] = {}
+    if fields:
+        doc["fields"] = fields
+    schema_meta = _decode(schema.metadata)
+    if schema_meta:
+        doc["schema"] = schema_meta
+    return _json(doc) if doc else None
+
+
+def schema_key(schema: pa.Schema, include_metadata: bool, flags: int) -> tuple[str, str | None]:
+    return phase1_json(schema, flags), (phase2_json(schema) if include_metadata else None)
+
+
+def schema_digest(schema: pa.Schema, include_metadata: bool, flags: int) -> bytes:
+    """Section 2.5."""
+    schema_nodes(schema)  # Section 7 rejections
+    phase1, phase2 = schema_key(schema, include_metadata, flags)
+    h = hashlib.sha256(header(flags))
+    h.update(phase1.encode())
+    if phase2 is not None:
+        h.update(phase2.encode())
+    return h.digest()
+
+
+# ---------------------------------------------------------------------------
+# Entries (Section 3.2)
+# ---------------------------------------------------------------------------
+
+class _Bits:
+    """Validity bits: u8 words, Lsb0, appended in bulk."""
+
+    __slots__ = ("_bytes", "_len")
+
+    def __init__(self) -> None:
+        self._bytes = bytearray()
+        self._len = 0
+
+    def append_bitmap(self, bitmap: pa.Buffer, bit_offset: int, n: int) -> None:
+        if n:
+            raw = memoryview(bitmap)[bit_offset >> 3:(bit_offset + n + 7) >> 3]
+            self._append_int((int.from_bytes(raw, "little") >> (bit_offset & 7)) & ((1 << n) - 1), n)
+
+    def append_true(self, n: int) -> None:
+        self._append_int((1 << n) - 1, n)
+
+    def _append_int(self, value: int, n: int) -> None:
+        if n == 0:
+            return
+        shift = self._len & 7
+        if shift:
+            value = (value << shift) | self._bytes.pop()
+        self._bytes += value.to_bytes((n + shift + 7) >> 3, "little")
+        self._len += n
+
+    def entry_bytes(self) -> bytes:
+        return _U64.pack(self._len) + bytes(self._bytes)
+
+
+class _Entry:
+    __slots__ = ("validity", "lengths", "values", "kind")
+
+    def __init__(self, field: pa.Field) -> None:
+        t = _logical(field.type)
+        self.kind = "struct" if pa.types.is_struct(t) else "list" if _is_list(t) else "leaf"
+        self.validity = _Bits() if field.nullable else None
+        self.lengths = hashlib.sha256() if self.kind == "list" else None
+        self.values = hashlib.sha256() if self.kind == "leaf" else None
+
+    def to_bytes(self) -> bytes:
+        out = b""
+        if self.validity is not None:
+            out += self.validity.entry_bytes()
+        if self.lengths is not None:
+            out += self.lengths.digest()
+        if self.values is not None:
+            out += self.values.digest()
+        return out
+
+
+def _resolve(arr: pa.Array) -> pa.Array:
+    """Extension arrays -> storage; dictionary arrays -> decoded values (repeatedly)."""
+    while True:
+        if isinstance(arr, pa.ExtensionArray):
+            arr = arr.storage
+        elif pa.types.is_dictionary(arr.type):
+            arr = arr.dictionary_decode()
+        else:
+            return arr
+
+
+def _and(a: pa.Array | None, b: pa.Array | None) -> pa.Array | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return pc.and_(a, b)
+
+
+_FIXED_WIDTH_CHECKS = (
+    pa.types.is_integer, pa.types.is_floating, pa.types.is_date, pa.types.is_time,
+    pa.types.is_timestamp, pa.types.is_duration, pa.types.is_decimal, pa.types.is_fixed_size_binary,
+)
+
+
+def _value_width(t: pa.DataType) -> int | None:
+    if any(check(t) for check in _FIXED_WIDTH_CHECKS):
+        return t.byte_width if pa.types.is_fixed_size_binary(t) else t.bit_width // 8
+    return None
+
+
+def _hash_values(arr: pa.Array, digest) -> None:
+    """Section 3.2 leaf value bytes of every element of `arr` (already valid-only)."""
+    t = arr.type
+    n = len(arr)
+    if pa.types.is_boolean(t):
+        for start in range(0, n, _CHUNK):
+            chunk = pc.cast(arr.slice(start, _CHUNK), pa.uint8())
+            digest.update(memoryview(chunk.buffers()[1])[chunk.offset:chunk.offset + len(chunk)])
+        return
+    width = _value_width(t)
+    if width is not None:
+        if n:
+            raw = memoryview(arr.buffers()[1])
+            digest.update(raw[arr.offset * width:(arr.offset + n) * width])
+        return
+    if pa.types.is_string(t) or pa.types.is_large_string(t) or pa.types.is_binary(t) or pa.types.is_large_binary(t):
+        if n == 0:
+            return
+        large = pa.types.is_large_string(t) or pa.types.is_large_binary(t)
+        size = 8 if large else 4
+        bufs = arr.buffers()
+        offsets = memoryview(bufs[1])[arr.offset * size:(arr.offset + n + 1) * size].cast("q" if large else "i")
+        data = memoryview(bufs[2]) if bufs[2] is not None else memoryview(b"")
+        for start in range(0, n, _CHUNK):
+            parts = []
+            for i in range(start, min(start + _CHUNK, n)):
+                a, b = offsets[i], offsets[i + 1]
+                parts.append(_U64.pack(b - a))
+                parts.append(data[a:b])
+            digest.update(b"".join(parts))
+        return
+    # PENDING (E4): Null, FixedSizeList, Map, Interval and view data are unsupported.
+    raise NotImplementedError(f"Hashing data of type {t} is not supported")
+
+
+def _visit(field: pa.Field, arr: pa.Array, path: str, enclosing: pa.Array | None, entries: dict) -> None:
+    """Feed the elements `arr` of the node `field` at `path` into its entry (Section 3.2).
+
+    `enclosing` is the AND of the enclosing struct validities at this list level (None:
+    all valid).
+    """
+    arr = _resolve(arr)
+    entry = entries[path]
+    own = arr.is_valid() if arr.null_count else None
+    if own is not None and not field.nullable:
+        # PENDING (E3): a non-nullable node holding nulls where its enclosing structs are valid.
+        bad = own if enclosing is None else pc.or_(own, pc.invert(enclosing))
+        if not pc.all(bad).as_py():
+            raise ValueError(f"Non-nullable field {path!r} contains nulls")
+    bits = _and(own, enclosing)
+
+    if entry.validity is not None:
+        if bits is None:
+            entry.validity.append_true(len(arr))
+        else:
+            entry.validity.append_bitmap(bits.buffers()[1], bits.offset, len(bits))
+
+    if entry.kind == "struct":
+        t = arr.type
+        for i in range(t.num_fields):
+            child = t.field(i)
+            _visit(child, arr.field(i), _join(path, child.name), bits, entries)
+        return
+
+    valid = arr if bits is None else arr.filter(bits)
+    if entry.kind == "list":
+        if len(valid):
+            lengths = pc.cast(valid.value_lengths(), pa.uint64())
+            entry.lengths.update(memoryview(lengths.buffers()[1])[lengths.offset * 8:(lengths.offset + len(lengths)) * 8])
+        # Items of valid list values only; list boundaries reset struct validity.
+        _visit(arr.type.value_field, valid.flatten(), path + "/", None, entries)
+        return
+
+    _hash_values(valid, entry.values)
+
+
+def _new_entries(nodes: list[tuple[str, pa.Field]]) -> dict[str, _Entry]:
+    return {path: _Entry(field) for path, field in nodes}
+
+
+def _finish_entries(entries: dict[str, _Entry]) -> bytes:
+    return b"".join(entries[path].to_bytes() for path in sorted(entries))
+
+
+# ---------------------------------------------------------------------------
+# Public entry points (Sections 2.5, 3.3, 4, 5)
+# ---------------------------------------------------------------------------
+
+class Digester:
+    """Streaming record-batch hasher (Section 3.3)."""
+
+    def __init__(
+        self,
+        schema: pa.Schema,
+        *,
+        include_metadata: bool = False,
+        ordered_columns: bool = False,
+        ordered_struct_fields: bool = False,
+    ) -> None:
+        self._flags = flags_of(ordered_columns, ordered_struct_fields)
+        self._include_metadata = include_metadata
+        self._schema_digest = schema_digest(schema, include_metadata, self._flags)
+        self._key = schema_key(schema, include_metadata, self._flags)
+        self._entries = _new_entries(schema_nodes(schema))
+        self._rows = 0
+
+    def update(self, batch: pa.RecordBatch) -> None:
+        schema = batch.schema
+        schema_nodes(schema)  # Section 7
+        if schema_key(schema, self._include_metadata, self._flags) != self._key:
+            raise ValueError(_SCHEMA_MISMATCH)
+        for i in range(batch.num_columns):
+            field = schema.field(i)
+            _visit(field, batch.column(i), field.name, None, self._entries)
+        self._rows += batch.num_rows
+
+    def finalize(self) -> bytes:
+        final = hashlib.sha256(self._schema_digest)
+        final.update(_U64.pack(self._rows))
+        final.update(_finish_entries(self._entries))
+        return VERSION_BYTES + final.digest()
+
+
+def hash_schema(schema: pa.Schema, *, include_metadata: bool = False, ordered_columns: bool = False,
+                ordered_struct_fields: bool = False) -> bytes:
+    return VERSION_BYTES + schema_digest(schema, include_metadata, flags_of(ordered_columns, ordered_struct_fields))
+
+
+def hash_record_batch(batch: pa.RecordBatch, **options: bool) -> bytes:
+    d = Digester(batch.schema, **options)
+    d.update(batch)
+    return d.finalize()
+
+
+def hash_table(table: pa.Table, **options: bool) -> bytes:
+    d = Digester(table.schema, **options)
+    for batch in table.to_batches():
+        d.update(batch)
+    return d.finalize()
+
+
+def hash_array(array: pa.Array, *, ordered_columns: bool = False, ordered_struct_fields: bool = False) -> bytes:
+    """Section 4: the array is the node at path "" (nullable iff it has a null)."""
+    flags = flags_of(ordered_columns, ordered_struct_fields)
+    root = pa.field("", array.type, nullable=array.null_count > 0)
+    nodes = _walk([("", root)])
+    entries = _new_entries(nodes)
+    _visit(root, array, "", None, entries)
+    final = hashlib.sha256(header(flags))
+    final.update(type_json(array.type, flags).encode())
+    final.update(_U64.pack(len(array)))
+    final.update(_finish_entries(entries))
+    return VERSION_BYTES + final.digest()
