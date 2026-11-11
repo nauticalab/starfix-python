@@ -713,3 +713,13 @@ def test_nullable_leaves_hashed_in_bounded_chunks(budget, monkeypatch) -> None:
         validity = u64(len(arr)) + bits.to_bytes((len(arr) + 7) // 8, "little")
         expected = V + sha(header(0), f2.type_json(arr.type, 0).encode(), u64(len(arr)), validity, sha(value_bytes))
         assert f2.hash_array(arr) == expected, (arr.type, budget)
+
+
+def test_zero_width_fixed_size_binary() -> None:
+    """FixedSizeBinary(0) values contribute no bytes; nulls are still recorded."""
+    arr = pa.array([b"", None, b""], type=pa.binary(0))
+    expected = V + sha(header(0), b'{"FixedSizeBinary":0}', u64(3), u64(3) + b"\x05", sha(b""))
+    assert f2.hash_array(arr) == expected
+    st = pa.StructArray.from_arrays([pa.array([b"", b""], pa.binary(0))], fields=[pa.field("z", pa.binary(0), nullable=False)],
+                                    mask=pa.array([False, True]))
+    f2.hash_record_batch(pa.record_batch([st], names=["s"]))  # masked by a nullable struct

@@ -437,6 +437,8 @@ def _hash_values(arr: pa.Array, bits: pa.Array | None, digest) -> None:
             digest.update(memoryview(chunk.buffers()[1])[chunk.offset:chunk.offset + len(chunk)])
         return
     width = _value_width(t)
+    if width == 0:
+        return  # FixedSizeBinary(0): no value bytes (validity is recorded by _visit)
     if width is not None:
         if bits is None:
             if n:
