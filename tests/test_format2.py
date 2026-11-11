@@ -690,3 +690,26 @@ def test_rejected_batch_restores_partial_validity_bytes() -> None:
         d.update(bad)
     d.update(good)
     assert d.finalize() == f2.hash_table(pa.Table.from_batches([good, good]))
+
+
+@pytest.mark.parametrize("budget", [1, 7, 64, 1 << 20])
+def test_nullable_leaves_hashed_in_bounded_chunks(budget, monkeypatch) -> None:
+    """Chunked processing of nullable leaves gives the spec bytes at any chunk size."""
+    monkeypatch.setattr(f2, "_BYTE_BUDGET", budget)
+    monkeypatch.setattr(f2, "_CHUNK", max(1, budget // 8))
+    strs = ["a", None, "bcd", "", None, "é" * 3, "z"]
+    ints = [1, None, 3, None, 5, 6, 7]
+    bools = [True, None, False, True, None, False, True]
+    fsb = [b"\x01\x02", None, b"\x03\x04", b"\x05\x06", None, b"\x07\x08", b"\x09\x0a"]
+    cases = [
+        (pa.array(strs).slice(1), b"".join(u64(len(s.encode())) + s.encode() for s in strs[1:] if s is not None)),
+        (pa.array(ints, pa.int32()).slice(1), i32(*[v for v in ints[1:] if v is not None])),
+        (pa.array(bools).slice(1), bytes(int(v) for v in bools[1:] if v is not None)),
+        (pa.array(fsb, pa.binary(2)).slice(1), b"".join(v for v in fsb[1:] if v is not None)),
+    ]
+    for arr, value_bytes in cases:
+        valid = [v is not None for v in arr.to_pylist()]
+        bits = sum(1 << i for i, ok in enumerate(valid) if ok)
+        validity = u64(len(arr)) + bits.to_bytes((len(arr) + 7) // 8, "little")
+        expected = V + sha(header(0), f2.type_json(arr.type, 0).encode(), u64(len(arr)), validity, sha(value_bytes))
+        assert f2.hash_array(arr) == expected, (arr.type, budget)

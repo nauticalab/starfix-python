@@ -342,8 +342,9 @@ class _Bits:
         self._bytes += value.to_bytes((n + shift + 7) >> 3, "little")
         self._len += n
 
-    def entry_bytes(self) -> bytes:
-        return _U64.pack(self._len) + bytes(self._bytes)
+    def feed(self, digest) -> None:
+        digest.update(_U64.pack(self._len))
+        digest.update(memoryview(self._bytes))
 
     def snapshot(self) -> tuple[int, int, int | None]:
         """O(1) state: appends only add bytes or change the last (partial) byte."""
@@ -379,15 +380,14 @@ class _Entry:
         if validity is not None:
             self.validity.restore(validity)
 
-    def to_bytes(self) -> bytes:
-        out = b""
+    def feed(self, digest) -> None:
+        """Section 3.2: [validity][lengths][values], fed without copying the bits."""
         if self.validity is not None:
-            out += self.validity.entry_bytes()
+            self.validity.feed(digest)
         if self.lengths is not None:
-            out += self.lengths.digest()
+            digest.update(self.lengths.digest())
         if self.values is not None:
-            out += self.values.digest()
-        return out
+            digest.update(self.values.digest())
 
 
 def _resolve(arr: pa.Array) -> pa.Array:
@@ -421,20 +421,33 @@ def _value_width(t: pa.DataType) -> int | None:
     return None
 
 
-def _hash_values(arr: pa.Array, digest) -> None:
-    """Section 3.2 leaf value bytes of every element of `arr` (already valid-only)."""
+def _hash_values(arr: pa.Array, bits: pa.Array | None, digest) -> None:
+    """Section 3.2 leaf value bytes of the elements of `arr` whose bit in `bits` is 1.
+
+    Works in bounded chunks: the valid values are never materialized as a whole.
+    """
     t = arr.type
     n = len(arr)
     if pa.types.is_boolean(t):
         for start in range(0, n, _CHUNK):
-            chunk = pc.cast(arr.slice(start, _CHUNK), pa.uint8())
+            chunk = arr.slice(start, _CHUNK)
+            if bits is not None:
+                chunk = chunk.filter(bits.slice(start, _CHUNK))
+            chunk = pc.cast(chunk, pa.uint8())
             digest.update(memoryview(chunk.buffers()[1])[chunk.offset:chunk.offset + len(chunk)])
         return
     width = _value_width(t)
     if width is not None:
-        if n:
-            raw = memoryview(arr.buffers()[1])
-            digest.update(raw[arr.offset * width:(arr.offset + n) * width])
+        if bits is None:
+            if n:
+                digest.update(memoryview(arr.buffers()[1])[arr.offset * width:(arr.offset + n) * width])
+            return
+        rows = max(1, _BYTE_BUDGET // width)
+        for start in range(0, n, rows):
+            chunk = arr.slice(start, rows).filter(bits.slice(start, rows))
+            if len(chunk):
+                raw = memoryview(chunk.buffers()[1])
+                digest.update(raw[chunk.offset * width:(chunk.offset + len(chunk)) * width])
         return
     if pa.types.is_string(t) or pa.types.is_large_string(t) or pa.types.is_binary(t) or pa.types.is_large_binary(t):
         if n == 0:
@@ -444,25 +457,33 @@ def _hash_values(arr: pa.Array, digest) -> None:
         bufs = arr.buffers()
         offsets = memoryview(bufs[1])[arr.offset * size:(arr.offset + n + 1) * size].cast("q" if large else "i")
         data = memoryview(bufs[2]) if bufs[2] is not None else memoryview(b"")
-        # Small values are joined into updates of about _BYTE_BUDGET bytes; a value of at
-        # least that size is fed straight from the data buffer (no copy).
+        # Nulls are skipped while reading the original buffers. Small values are joined
+        # into updates of about _BYTE_BUDGET bytes; a value of at least that size is fed
+        # straight from the data buffer (no copy).
         parts: list = []
         pending = 0
-        for i in range(n):
-            a, b = offsets[i], offsets[i + 1]
-            size = b - a
-            if size >= _BYTE_BUDGET:
-                parts.append(_U64.pack(size))
-                digest.update(b"".join(parts))
-                digest.update(data[a:b])
-                parts, pending = [], 0
-                continue
-            parts.append(_U64.pack(size))
-            parts.append(data[a:b])
-            pending += 8 + size
-            if pending >= _BYTE_BUDGET:
-                digest.update(b"".join(parts))
-                parts, pending = [], 0
+        pack = _U64.pack
+        for chunk_start in range(0, n, _CHUNK):
+            chunk_end = min(chunk_start + _CHUNK, n)
+            offs = offsets[chunk_start:chunk_end + 1].tolist()
+            pairs = zip(offs, offs[1:])
+            if bits is not None:
+                flags = bits.slice(chunk_start, chunk_end - chunk_start).to_pylist()
+                pairs = (pair for pair, ok in zip(pairs, flags) if ok)
+            for a, b in pairs:
+                size_i = b - a
+                if size_i >= _BYTE_BUDGET:
+                    parts.append(pack(size_i))
+                    digest.update(b"".join(parts))
+                    digest.update(data[a:b])
+                    parts, pending = [], 0
+                    continue
+                parts.append(pack(size_i))
+                parts.append(data[a:b])
+                pending += 8 + size_i
+                if pending >= _BYTE_BUDGET:
+                    digest.update(b"".join(parts))
+                    parts, pending = [], 0
         if parts:
             digest.update(b"".join(parts))
         return
@@ -498,8 +519,8 @@ def _visit(field: pa.Field, arr: pa.Array, path: str, enclosing: pa.Array | None
             _visit(child, arr.field(i), f"{path}/{child.name}", bits, entries)
         return
 
-    valid = arr if bits is None else arr.filter(bits)
     if entry.kind == "list":
+        valid = arr if bits is None else arr.filter(bits)
         if len(valid):
             lengths = pc.cast(valid.value_lengths(), pa.uint64())
             entry.lengths.update(memoryview(lengths.buffers()[1])[lengths.offset * 8:(lengths.offset + len(lengths)) * 8])
@@ -507,7 +528,7 @@ def _visit(field: pa.Field, arr: pa.Array, path: str, enclosing: pa.Array | None
         _visit(arr.type.value_field, valid.flatten(), path + "/", None, entries)
         return
 
-    _hash_values(valid, entry.values)
+    _hash_values(arr, bits, entry.values)
 
 
 def _is_unsupported_data(t: pa.DataType) -> bool:
@@ -530,8 +551,10 @@ def _new_entries(nodes: list[tuple[str, pa.Field]]) -> dict[str, _Entry]:
     return {path: _Entry(field) for path, field in nodes}
 
 
-def _finish_entries(entries: dict[str, _Entry]) -> bytes:
-    return b"".join(entries[path].to_bytes() for path in sorted(entries))
+def _feed_entries(entries: dict[str, _Entry], digest) -> None:
+    """All entries in byte-wise node-path order, fed one by one (no joined copy)."""
+    for path in sorted(entries):
+        entries[path].feed(digest)
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +602,7 @@ class Digester:
     def finalize(self) -> bytes:
         final = hashlib.sha256(self._schema_digest)
         final.update(_U64.pack(self._rows))
-        final.update(_finish_entries(self._entries))
+        _feed_entries(self._entries, final)
         return VERSION_BYTES + final.digest()
 
 
@@ -616,5 +639,5 @@ def hash_array(array: pa.Array, *, ordered_columns: bool = False, ordered_struct
     final = hashlib.sha256(header(flags))
     final.update(type_json(array.type, flags).encode())
     final.update(_U64.pack(len(array)))
-    final.update(_finish_entries(entries))
+    _feed_entries(entries, final)
     return VERSION_BYTES + final.digest()
