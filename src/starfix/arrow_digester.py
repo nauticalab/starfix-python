@@ -521,7 +521,13 @@ def _traverse_list(array, value_field, nullable, path, ancestor_nulls, fields):
     own_valid = _get_validity_list(array)
     effective_nulls = _combine_null_masks(own_valid, ancestor_nulls)
 
-    # For each row, write structural info and recurse into non-null elements
+    if not _contains_boolean(value_field.type):
+        _traverse_list_vectorised(array, value_field, list_path, effective_nulls, fields)
+        return
+
+    # Per-row path, kept only where a Boolean leaf lies below the list: the Boolean
+    # layout (spec Section 3.2) bit-packs each update separately, so the row
+    # boundaries are part of the hash there.
     offsets = array.offsets
     for i in range(len(array)):
         is_valid = effective_nulls is None or effective_nulls[i]
@@ -545,6 +551,52 @@ def _traverse_list(array, value_field, nullable, path, ancestor_nulls, fields):
                 None,  # list elements don't inherit ancestor struct nulls
                 fields,
             )
+
+
+def _contains_boolean(data_type) -> bool:
+    """Whether a Boolean leaf occurs anywhere in `data_type` (dictionaries looked through)."""
+    import pyarrow as pa
+
+    t = data_type
+    while pa.types.is_dictionary(t):
+        t = t.value_type
+    if pa.types.is_boolean(t):
+        return True
+    if pa.types.is_struct(t):
+        return any(_contains_boolean(t.field(i).type) for i in range(t.num_fields))
+    if pa.types.is_list(t) or pa.types.is_large_list(t) or pa.types.is_fixed_size_list(t):
+        return _contains_boolean(t.value_type)
+    return False
+
+
+def _traverse_list_vectorised(array, value_field, list_path, effective_nulls, fields):
+    """All rows of a list array at once: byte-identical to visiting each valid row.
+
+    Every digest is a stream, so writing the lengths of all valid rows and then
+    traversing the concatenation of their values once feeds exactly the bytes that
+    per-row traversal feeds (no Boolean below: see `_traverse_list`).
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    valid = array if effective_nulls is None else array.filter(pa.array(effective_nulls, pa.bool_()))
+
+    # Lengths of the valid rows, as u64 LE, into the structural digest at list_path
+    # (absent when a nullable list element replaced that entry: spec Section 3.4).
+    entry = fields.get(list_path)
+    if entry is not None and entry[1] is not None and len(valid):
+        lengths = pc.cast(valid.value_lengths(), pa.uint64())
+        entry[1].update(memoryview(lengths.buffers()[1])[lengths.offset * 8:(lengths.offset + len(lengths)) * 8])
+
+    # flatten() honours the slice offset and skips the ranges of null slots.
+    _traverse_and_update(
+        value_field.type,
+        value_field.nullable,
+        valid.flatten(),
+        list_path,
+        None,  # list elements don't inherit ancestor struct nulls
+        fields,
+    )
 
 
 def _traverse_struct(array, nullable, path, ancestor_nulls, fields):

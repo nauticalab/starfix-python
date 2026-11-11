@@ -41,3 +41,35 @@ def test_list_leaf_hashing_never_copies_the_shared_values_buffer() -> None:
     finally:
         tracemalloc.stop()
     assert peak < buffer_size // 4, f"peak {peak} bytes: the shared values buffer was copied"
+
+
+def _count_traversals(monkeypatch, table: pa.Table) -> int:
+    import starfix.arrow_digester as ad
+
+    calls = 0
+    original = ad._traverse_and_update
+
+    def counting(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ad, "_traverse_and_update", counting)
+    ArrowDigester.hash_table(table)
+    monkeypatch.setattr(ad, "_traverse_and_update", original)
+    return calls
+
+
+def _nested_table(rows: int) -> pa.Table:
+    t = pa.list_(pa.field("item", pa.struct([("a", pa.int16()), ("b", pa.list_(pa.utf8()))])))
+    col = pa.array(
+        [None if i % 7 == 0 else [{"a": i, "b": ["x"] * (i % 3)}] * (i % 4) for i in range(rows)], t
+    )
+    return pa.table({"c": col})
+
+
+def test_list_traversal_work_does_not_grow_with_rows(monkeypatch) -> None:
+    """Lists are traversed once per node per batch, not once per row."""
+    small = _count_traversals(monkeypatch, _nested_table(10))
+    large = _count_traversals(monkeypatch, _nested_table(10_000))
+    assert small == large, f"{small} traversals for 10 rows, {large} for 10,000 rows"
