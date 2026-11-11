@@ -3,9 +3,6 @@
 Implements ``nauticalab/starfix docs/byte-layout-spec.md`` (format 2) from the
 specification alone. Section numbers below refer to that document.
 
-Pending spec decisions (marked ``PENDING`` in the code): E1 extension metadata of types
-pyarrow registers in C++; E2/E3 nulls in non-nullable nodes; E4 unsupported data types
-with zero rows; E5/E6 nested dictionary and extension values.
 """
 
 from __future__ import annotations
@@ -144,17 +141,14 @@ def type_json(t: pa.DataType, flags: int) -> str:
 # Node paths (Sections 3.1, 7) and Phase 1 / Phase 2 (Sections 2.2, 2.3)
 # ---------------------------------------------------------------------------
 
-def _join(parent: str, name: str) -> str:
-    return f"{parent}/{name}" if parent else name
-
-
 def _children(field_type: pa.DataType, path: str) -> list[tuple[str, pa.Field]]:
     """The child nodes of a node of this type, as (node path, field)."""
     t = _logical(field_type)
     if _is_rejected_type(t):
         raise ValueError(f"Unsupported Arrow type for hashing: {t}")
     if pa.types.is_struct(t):
-        return [(_join(path, t.field(i).name), t.field(i)) for i in range(t.num_fields)]
+        # Section 3.1: always p + "/" + name (also when p or name is empty).
+        return [(f"{path}/{t.field(i).name}", t.field(i)) for i in range(t.num_fields)]
     if _is_list(t) or pa.types.is_fixed_size_list(t):
         return [(path + "/", t.value_field)]
     if pa.types.is_map(t):
@@ -210,9 +204,10 @@ def _decode(mapping) -> dict[str, str]:
 def _extension_metadata(t: pa.DataType) -> dict[str, str]:
     """ARROW:extension:* keys of a registered extension type (pyarrow hides them).
 
-    PENDING (E1): pyarrow's C++ canonical types have no __arrow_ext_serialize__; their
-    serialized metadata is what pyarrow exports for the type (its canonical
-    serialization), not necessarily the bytes that were stored.
+    Python-defined ExtensionType subclasses serialize their stored bytes. pyarrow's
+    natively registered canonical types have no __arrow_ext_serialize__; their metadata
+    is what pyarrow exports for the type, its canonical serialization, and the spec
+    (Section 2.3) defines their hash only for that canonical stored form.
     """
     if not _is_extension(t):
         return {}
@@ -277,6 +272,9 @@ def _exported_extension_metadata(t: pa.DataType) -> bytes:
 def _field_metadata(field: pa.Field) -> dict[str, str]:
     meta = _decode(field.metadata)
     meta.update(_extension_metadata(field.type))
+    # Section 2.3: an absent ARROW:extension:metadata is hashed as "" (absent == empty).
+    if "ARROW:extension:name" in meta:
+        meta.setdefault("ARROW:extension:metadata", "")
     return meta
 
 
@@ -428,8 +426,7 @@ def _hash_values(arr: pa.Array, digest) -> None:
                 parts.append(data[a:b])
             digest.update(b"".join(parts))
         return
-    # PENDING (E4): Null, FixedSizeList, Map, Interval and view data are unsupported.
-    raise NotImplementedError(f"Hashing data of type {t} is not supported")
+    raise ValueError(f"Hashing data of type {t} is not supported")  # checked earlier (Section 7)
 
 
 def _visit(field: pa.Field, arr: pa.Array, path: str, enclosing: pa.Array | None, entries: dict) -> None:
@@ -442,7 +439,7 @@ def _visit(field: pa.Field, arr: pa.Array, path: str, enclosing: pa.Array | None
     entry = entries[path]
     own = arr.is_valid() if arr.null_count else None
     if own is not None and not field.nullable:
-        # PENDING (E3): a non-nullable node holding nulls where its enclosing structs are valid.
+        # Section 7 item 4: a null in a non-nullable node not masked by an enclosing struct null.
         bad = own if enclosing is None else pc.or_(own, pc.invert(enclosing))
         if not pc.all(bad).as_py():
             raise ValueError(f"Non-nullable field {path!r} contains nulls")
@@ -458,7 +455,7 @@ def _visit(field: pa.Field, arr: pa.Array, path: str, enclosing: pa.Array | None
         t = arr.type
         for i in range(t.num_fields):
             child = t.field(i)
-            _visit(child, arr.field(i), _join(path, child.name), bits, entries)
+            _visit(child, arr.field(i), f"{path}/{child.name}", bits, entries)
         return
 
     valid = arr if bits is None else arr.filter(bits)
@@ -471,6 +468,22 @@ def _visit(field: pa.Field, arr: pa.Array, path: str, enclosing: pa.Array | None
         return
 
     _hash_values(valid, entry.values)
+
+
+def _is_unsupported_data(t: pa.DataType) -> bool:
+    """Section 8: types whose schema hashes but whose data does not."""
+    return (
+        pa.types.is_null(t) or pa.types.is_fixed_size_list(t) or pa.types.is_map(t)
+        or str(t) in _INTERVALS or str(t) in ("string_view", "binary_view")
+    )
+
+
+def _check_data_supported(nodes: list[tuple[str, pa.Field]]) -> None:
+    """Section 7 item 3: runs before any data is hashed, whatever the number of rows."""
+    for path, field in nodes:
+        t = _logical(field.type)
+        if _is_unsupported_data(t):
+            raise ValueError(f"Hashing data of type {t} (node {path!r}) is not supported")
 
 
 def _new_entries(nodes: list[tuple[str, pa.Field]]) -> dict[str, _Entry]:
@@ -500,7 +513,9 @@ class Digester:
         self._include_metadata = include_metadata
         self._schema_digest = schema_digest(schema, include_metadata, self._flags)
         self._key = schema_key(schema, include_metadata, self._flags)
-        self._entries = _new_entries(schema_nodes(schema))
+        nodes = schema_nodes(schema)
+        _check_data_supported(nodes)
+        self._entries = _new_entries(nodes)
         self._rows = 0
 
     def update(self, batch: pa.RecordBatch) -> None:
@@ -547,6 +562,7 @@ def hash_array(array: pa.Array, *, ordered_columns: bool = False, ordered_struct
     flags = flags_of(ordered_columns, ordered_struct_fields)
     root = pa.field("", array.type, nullable=_resolve(array).null_count > 0)
     nodes = _walk([("", root)])
+    _check_data_supported(nodes)
     entries = _new_entries(nodes)
     _visit(root, array, "", None, entries)
     final = hashlib.sha256(header(flags))

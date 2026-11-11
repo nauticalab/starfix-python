@@ -421,10 +421,27 @@ def test_slash_aliasing_nothing_is_accepted() -> None:
     f2.hash_schema(pa.schema([pa.field("km/h", pa.float64()), pa.field("km", pa.int8())]))
 
 
-def test_hash_array_root_path_is_claimed() -> None:
-    arr = pa.StructArray.from_arrays([pa.array([1])], fields=[pa.field("", pa.int64())])
+def test_struct_child_paths_always_use_a_slash() -> None:
+    """Spec 3.1: a struct child is p + "/" + name, also when p or name is empty."""
+    # hash_array root struct child "" is the node "/" (distinct from the root "").
+    arr = pa.StructArray.from_arrays([pa.array([1], pa.int64())], fields=[pa.field("", pa.int64(), nullable=False)])
+    type_json = b'{"Struct":[{"data_type":"Int64","name":"","nullable":false}]}'
+    assert f2.hash_array(arr) == V + sha(header(0), type_json, u64(1), sha(struct.pack("<q", 1)))
+    # A struct column "" with child "a" (node "/a") next to a column "/a" is ambiguous ...
+    st = pa.struct([pa.field("a", pa.int8())])
     with pytest.raises(ValueError):
-        f2.hash_array(arr)
+        f2.hash_schema(pa.schema([pa.field("", st), pa.field("/a", pa.int8())]))
+    # ... while a column "a" next to it is not.
+    f2.hash_schema(pa.schema([pa.field("", st), pa.field("a", pa.int8())]))
+
+
+def test_hash_array_root_struct_child_metadata_free_paths_sort_after_root() -> None:
+    """Entries of a root struct: "" (validity) then "/x" (byte order)."""
+    s = pa.StructArray.from_arrays([pa.array([1, 2], pa.int8())], fields=[pa.field("x", pa.int8(), nullable=True)],
+                                   mask=pa.array([False, True]))
+    type_json = b'{"Struct":[{"data_type":"Int8","name":"x","nullable":true}]}'
+    expected = V + sha(header(0), type_json, u64(2), u64(2) + b"\x01", u64(2) + b"\x01", sha(b"\x01"))
+    assert f2.hash_array(s) == expected
 
 
 # ── Section 5: per-batch schema check ──────────────────────────────────
@@ -450,11 +467,23 @@ def test_streaming_check() -> None:
 # ── Section 8: unsupported data ─────────────────────────────────────────
 
 
-def test_unsupported_data_raises() -> None:
-    batch = pa.record_batch([pa.array([None, None], pa.null())], names=["n"])
-    f2.hash_schema(batch.schema)
-    with pytest.raises(NotImplementedError):
-        f2.hash_record_batch(batch)
+@pytest.mark.parametrize(
+    "t",
+    [pa.null(), pa.list_(pa.int8(), 2), pa.map_(pa.utf8(), pa.int8()), pa.month_day_nano_interval(),
+     pa.struct([pa.field("n", pa.null())]), pa.list_(pa.null())],
+    ids=["null", "fixed_size_list", "map", "interval", "nested_null", "list_of_null"],
+)
+def test_unsupported_data_rejected_whatever_the_row_count(t) -> None:
+    """Spec 7 item 3: rejected before any data is hashed, also with zero rows / no batches."""
+    schema = pa.schema([pa.field("c", t)])
+    f2.hash_schema(schema)  # schemas of these types hash
+    with pytest.raises(ValueError):
+        f2.Digester(schema)
+    empty = pa.RecordBatch.from_arrays([pa.array([], t)], schema=schema)
+    with pytest.raises(ValueError):
+        f2.hash_record_batch(empty)
+    with pytest.raises(ValueError):
+        f2.hash_array(pa.array([], t))
 
 
 # ── Section 2.3: extension types (E1 pending for pyarrow's C++ built-in types) ──
@@ -525,6 +554,19 @@ def test_unregistered_extension_keys_hashed_verbatim() -> None:
     seen, _ = _ipc_roundtrip(schema)
     phase2 = b'{"fields":{"q":{"ARROW:extension:metadata":"v1","ARROW:extension:name":"other.thing"}}}'
     assert f2.hash_schema(seen, include_metadata=True) == V + sha(header(0), b'{"q":{"data_type":"Int32","nullable":true}}', phase2)
+
+
+def test_extension_name_without_metadata_key_is_hashed_as_empty_metadata() -> None:
+    """Spec 2.3: ARROW:extension:name present and :metadata absent -> hashed as "" (E1)."""
+    name_only = pa.schema([pa.field("q", pa.int32(), metadata={"ARROW:extension:name": "other.thing"})])
+    empty = pa.schema([pa.field("q", pa.int32(), metadata={
+        "ARROW:extension:name": "other.thing", "ARROW:extension:metadata": ""})])
+    phase2 = b'{"fields":{"q":{"ARROW:extension:metadata":"","ARROW:extension:name":"other.thing"}}}'
+    expected = V + sha(header(0), b'{"q":{"data_type":"Int32","nullable":true}}', phase2)
+    assert f2.hash_schema(name_only, include_metadata=True) == expected
+    assert f2.hash_schema(empty, include_metadata=True) == expected
+    seen, _ = _ipc_roundtrip(name_only)
+    assert f2.hash_schema(seen, include_metadata=True) == expected
 
 
 def test_builtin_uuid_extension_with_canonical_metadata() -> None:
