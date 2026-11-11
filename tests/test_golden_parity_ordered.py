@@ -98,7 +98,33 @@ def test_fixture_is_well_formed() -> None:
         assert not unknown, f"relation {rel['ids']} names unknown vector ids {unknown}"
 
 
-@pytest.mark.parametrize("vector", _vectors(), ids=lambda v: v["id"])
+# Default-mode (no options) vectors on which starfix-python's released output differs
+# from Rust. Changing default output moves released hashes; that is the developer's
+# decision (see tests/test_known_divergences.py). strict=True: these turn into hard
+# failures once the default output is fixed, so the entry must then be removed.
+_KNOWN_DEFAULT_MODE_DIVERGENCES = {
+    "map_struct_ab_schema_f0": "default Map JSON omits the value type (known divergence)",
+    "map_struct_ba_schema_f0": "default Map JSON omits the value type (known divergence)",
+}
+
+
+def _vector_params() -> list[Any]:
+    params = []
+    for v in _vectors():
+        reason = _KNOWN_DEFAULT_MODE_DIVERGENCES.get(v["id"])
+        marks = [pytest.mark.xfail(strict=True, reason=reason)] if reason else []
+        params.append(pytest.param(v, id=v["id"], marks=marks))
+    return params
+
+
+def test_known_divergences_are_default_mode_vectors() -> None:
+    by_id = {v["id"]: v for v in _vectors()}
+    for vid in _KNOWN_DEFAULT_MODE_DIVERGENCES:
+        assert vid in by_id, f"known divergence '{vid}' is not in the golden file"
+        assert not any(_options(by_id[vid]).values()), f"'{vid}' is not a default-mode vector"
+
+
+@pytest.mark.parametrize("vector", _vector_params())
 def test_golden_vector(vector: dict[str, Any]) -> None:
     """Each vector must produce the Rust-authoritative expected_hash."""
     got = _hash(vector)
