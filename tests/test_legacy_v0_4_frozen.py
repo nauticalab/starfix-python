@@ -13,7 +13,7 @@ from pathlib import Path
 
 _SRC = Path(__file__).parent.parent / "src" / "starfix"
 _LEGACY = _SRC / "legacy" / "v0_4.py"
-_LEGACY_SHA256 = "652b0620bc484ab0ccf89a5423945244e6195d99484e1afcae48de5f4704ada3"
+_LEGACY_SHA256 = "7b4c76508f1f96b96c18e0d2bac87b9f2e8ae8b343254b9be5060e87e0fe6704"
 
 
 def test_legacy_module_is_unchanged() -> None:

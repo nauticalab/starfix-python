@@ -2,7 +2,11 @@
 # FROZEN LEGACY MODULE: starfix-python 0.4 hash format (format 1, prefix 00 00 01).
 #
 # This file is starfix-python v0.4.0's src/starfix/arrow_digester.py (tag v0.4.0, commit
-# d2ed97e), VERBATIM below this header. It exists ONLY to read or match data hashed by
+# d2ed97e), verbatim below this header EXCEPT ONE performance-only line, marked
+# "LEGACY PATCH": in _hash_fixed_size_data, `raw = data_buf.to_pybytes()` became
+# `raw = memoryview(data_buf)`, which removes the quadratic cost of list columns (ITL-908)
+# and changes no hash (proven by the restored 0.4.0 tests and by the differential test
+# against the released starfix==0.4.0). It exists ONLY to read or match data hashed by
 # starfix-python 0.4.x; never hash new data with it (use starfix.ArrowDigester, format 2).
 # Its known defects (collisions, batch-split dependence, differences from Rust 0.4) are
 # kept on purpose and listed in the README section "Legacy 0.4 mode".
@@ -671,7 +675,7 @@ def _hash_fixed_size_data(arr, data_digest, element_size: int, effective_nulls) 
     data_buf = bufs[1]
     offset = arr.offset
 
-    raw = data_buf.to_pybytes()
+    raw = memoryview(data_buf)  # LEGACY PATCH (performance only, see header)
     start = offset * element_size
 
     if effective_nulls is None:

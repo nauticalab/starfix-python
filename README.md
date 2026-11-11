@@ -125,7 +125,8 @@ to read or match data hashed by starfix-python 0.4.x** (for example to find stor
 its old key). **Never hash new data with it**: use `starfix.ArrowDigester`.
 
 It is frozen: never fixed and never extended (no order options). Its code is the 0.4.0 module
-verbatim, kept apart from the format-2 code. Its output is pinned by the restored 0.4.0 tests and golden file, and by a differential
+verbatim except one performance-only line (list columns hash in linear time; no hash changes),
+kept apart from the format-2 code. Its output is pinned by the restored 0.4.0 tests and golden file, and by a differential
 test against the released `starfix==0.4.0` package.
 
 Known defects, kept on purpose (all fixed in format 2):
