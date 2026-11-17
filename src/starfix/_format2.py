@@ -334,10 +334,12 @@ def _field_metadata(field: pa.Field) -> dict[str, str]:
     return meta
 
 
-def phase2_json(schema: pa.Schema) -> str | None:
-    """Section 2.3: metadata keyed by node path; None when there is none."""
+def phase2_json(schema: pa.Schema, nodes: list[tuple[str, pa.Field]] | None = None) -> str | None:
+    """Section 2.3: metadata keyed by node path; None when there is none.
+
+    `nodes` are the schema's nodes when already walked (``schema_nodes(schema)``)."""
     fields = {}
-    for path, field in schema_nodes(schema):
+    for path, field in (schema_nodes(schema) if nodes is None else nodes):
         try:
             meta = _field_metadata(field)
         except _AmbiguousMetadata as exc:
@@ -353,19 +355,29 @@ def phase2_json(schema: pa.Schema) -> str | None:
     return _json(doc) if doc else None
 
 
-def schema_key(schema: pa.Schema, include_metadata: bool, flags: int) -> tuple[str, str | None]:
-    return phase1_json(schema, flags), (phase2_json(schema) if include_metadata else None)
+def schema_key(
+    schema: pa.Schema, include_metadata: bool, flags: int, nodes: list[tuple[str, pa.Field]] | None = None
+) -> tuple[str, str | None]:
+    """The canonical schema text (Phase 1, and Phase 2 with include_metadata): everything of the
+    schema that enters a hash. Walks the nodes (Section 7 rejections) unless `nodes` is given."""
+    if nodes is None:
+        nodes = schema_nodes(schema)
+    return phase1_json(schema, flags), (phase2_json(schema, nodes) if include_metadata else None)
 
 
-def schema_digest(schema: pa.Schema, include_metadata: bool, flags: int) -> bytes:
+def _digest_of_key(key: tuple[str, str | None], flags: int) -> bytes:
     """Section 2.5."""
-    schema_nodes(schema)  # Section 7 rejections
-    phase1, phase2 = schema_key(schema, include_metadata, flags)
+    phase1, phase2 = key
     h = hashlib.sha256(header(KIND_SCHEMA, flags))
     h.update(phase1.encode())
     if phase2 is not None:
         h.update(phase2.encode())
     return h.digest()
+
+
+def schema_digest(schema: pa.Schema, include_metadata: bool, flags: int) -> bytes:
+    """Section 2.5."""
+    return _digest_of_key(schema_key(schema, include_metadata, flags), flags)
 
 
 # ---------------------------------------------------------------------------
@@ -418,22 +430,25 @@ class _Bits:
         self._len = bit_len
 
 
+def _entry_kind(field_type: pa.DataType) -> str:
+    t = _logical(field_type)
+    if pa.types.is_struct(t):
+        return "struct"
+    if _is_list(t):
+        return "list"
+    if pa.types.is_fixed_size_list(t):
+        return "fixed_size_list"  # Section 3.2: validity only (n is in the schema)
+    return "leaf"
+
+
 class _Entry:
     __slots__ = ("kind", "lengths", "validity", "values")
 
-    def __init__(self, field: pa.Field) -> None:
-        t = _logical(field.type)
-        if pa.types.is_struct(t):
-            self.kind = "struct"
-        elif _is_list(t):
-            self.kind = "list"
-        elif pa.types.is_fixed_size_list(t):
-            self.kind = "fixed_size_list"  # Section 3.2: validity only (n is in the schema)
-        else:
-            self.kind = "leaf"
-        self.validity = _Bits() if field.nullable else None
-        self.lengths = hashlib.sha256() if self.kind == "list" else None
-        self.values = hashlib.sha256() if self.kind == "leaf" else None
+    def __init__(self, kind: str, nullable: bool) -> None:
+        self.kind = kind
+        self.validity = _Bits() if nullable else None
+        self.lengths = hashlib.sha256() if kind == "list" else None
+        self.values = hashlib.sha256() if kind == "leaf" else None
 
     def snapshot(self) -> tuple:
         return (
@@ -784,16 +799,24 @@ def _is_unsupported_data(t: pa.DataType) -> bool:
     )
 
 
-def _check_data_supported(nodes: list[tuple[str, pa.Field]]) -> None:
-    """Section 7 item 3: runs before any data is hashed, whatever the number of rows."""
+def _data_support_error(nodes: list[tuple[str, pa.Field]]) -> str | None:
+    """Section 7 item 3: the error for a schema whose data cannot be hashed (None: it can)."""
     for path, field in nodes:
         t = _logical(field.type)
         if _is_unsupported_data(t):
-            raise ValueError(f"Hashing data of type {t} (node {path!r}) is not supported")
+            return f"Hashing data of type {t} (node {path!r}) is not supported"
+    return None
+
+
+def _check_data_supported(nodes: list[tuple[str, pa.Field]]) -> None:
+    """Section 7 item 3: runs before any data is hashed, whatever the number of rows."""
+    error = _data_support_error(nodes)
+    if error is not None:
+        raise ValueError(error)
 
 
 def _new_entries(nodes: list[tuple[str, pa.Field]]) -> dict[str, _Entry]:
-    return {path: _Entry(field) for path, field in nodes}
+    return {path: _Entry(_entry_kind(field.type), field.nullable) for path, field in nodes}
 
 
 def _feed_entries(entries: dict[str, _Entry], digest) -> None:
@@ -806,6 +829,72 @@ def _feed_entries(entries: dict[str, _Entry], digest) -> None:
 # Public entry points (Sections 2.5, 3.3, 4, 5)
 # ---------------------------------------------------------------------------
 
+def _ipc_bytes(schema: pa.Schema) -> bytes | None:
+    """The schema as an Arrow IPC schema message (None if pyarrow cannot serialize it)."""
+    try:
+        return schema.serialize().to_pybytes()
+    except Exception:  # noqa: BLE001 - only disables the fast path of SchemaAnalysis.matches
+        return None
+
+
+class SchemaAnalysis:
+    """Everything the schema analysis produces, computed once (ITL-1177); immutable.
+
+    Holds the hashing options, the canonical schema key and digest (Section 2.5), the
+    entries to create for the schema's nodes in node-path order (Section 3.2), the
+    data-support verdict (Section 7 item 3) and the schema's Arrow IPC bytes, which make
+    `matches` cheap for an identical schema.
+    """
+
+    __slots__ = ("_data_error", "_ipc", "_specs", "digest", "flags", "include_metadata", "key")
+
+    def __init__(self, schema: pa.Schema, include_metadata: bool, flags: int) -> None:
+        nodes = schema_nodes(schema)  # Section 7 rejections, once
+        self.include_metadata = include_metadata
+        self.flags = flags
+        self.key = schema_key(schema, include_metadata, flags, nodes)
+        self.digest = _digest_of_key(self.key, flags)
+        # Entries in byte-wise node-path order (Section 3.3), so finalize needs no sort.
+        self._specs = tuple(
+            (path, _entry_kind(field.type), field.nullable) for path, field in sorted(nodes, key=lambda n: n[0])
+        )
+        self._data_error = _data_support_error(nodes)
+        self._ipc = _ipc_bytes(schema)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if hasattr(self, "_ipc"):  # the last slot set by __init__
+            raise AttributeError("SchemaAnalysis is immutable")
+        object.__setattr__(self, name, value)
+
+    def require_data_supported(self) -> None:
+        if self._data_error is not None:
+            raise ValueError(self._data_error)
+
+    def new_entries(self) -> dict[str, _Entry]:
+        return {path: _Entry(kind, nullable) for path, kind, nullable in self._specs}
+
+    def matches(self, schema: pa.Schema) -> bool:
+        """Whether `schema` has this schema key: everything that enters a hash under these
+        options is the same (Section 5's rule for streamed batches).
+
+        Fast path: identical Arrow IPC bytes mean an identical schema (names, types,
+        nullability, order, all field and schema metadata at every depth, extension names,
+        serializations and storage types). Otherwise the key is computed and compared,
+        which accepts hash-equivalent schemas (e.g. string vs large_string) and raises
+        Section 7 errors exactly as the full analysis does.
+        """
+        if self._ipc is not None and _ipc_bytes(schema) == self._ipc:
+            return True
+        return schema_key(schema, self.include_metadata, self.flags) == self.key
+
+
+def analyse(schema: pa.Schema, entry_point: str, *, include_metadata: bool = False, ordered_columns: bool = False,
+            ordered_struct_fields: bool = False) -> SchemaAnalysis:
+    _require_little_endian()
+    _require(schema, pa.Schema, entry_point, "a pyarrow.Schema")
+    return SchemaAnalysis(schema, include_metadata, flags_of(ordered_columns, ordered_struct_fields))
+
+
 class Digester:
     """Streaming record-batch hasher (Section 3.3)."""
 
@@ -817,41 +906,51 @@ class Digester:
         ordered_columns: bool = False,
         ordered_struct_fields: bool = False,
     ) -> None:
-        _require_little_endian()
-        _require(schema, pa.Schema, "ArrowDigester", "a pyarrow.Schema")
-        self._flags = flags_of(ordered_columns, ordered_struct_fields)
-        self._include_metadata = include_metadata
-        self._schema_digest = schema_digest(schema, include_metadata, self._flags)
-        self._key = schema_key(schema, include_metadata, self._flags)
-        nodes = schema_nodes(schema)
-        _check_data_supported(nodes)
-        self._entries = _new_entries(nodes)
+        self._start(analyse(schema, "ArrowDigester", include_metadata=include_metadata,
+                            ordered_columns=ordered_columns, ordered_struct_fields=ordered_struct_fields))
+
+    @classmethod
+    def from_analysis(cls, analysis: SchemaAnalysis) -> Digester:
+        """A digester for a schema analysed earlier (no analysis is repeated)."""
+        digester = cls.__new__(cls)
+        digester._start(analysis)
+        return digester
+
+    def _start(self, analysis: SchemaAnalysis) -> None:
+        analysis.require_data_supported()
+        self._analysis = analysis
+        self._entries = analysis.new_entries()
         self._rows = 0
 
     def update(self, batch: pa.RecordBatch) -> None:
         _require(batch, pa.RecordBatch, "update", "a pyarrow.RecordBatch (use hash_table for a Table)")
         schema = batch.schema
-        schema_nodes(schema)  # Section 7
-        if schema_key(schema, self._include_metadata, self._flags) != self._key:
+        if not self._analysis.matches(schema):
             raise ValueError(_SCHEMA_MISMATCH)
         # A batch rejected while it is traversed (Section 7 item 4) leaves the digester
         # exactly as it was.
         saved = {path: entry.snapshot() for path, entry in self._entries.items()}
         try:
-            for i in range(batch.num_columns):
-                field = schema.field(i)
-                _visit(field, batch.column(i), field.name, None, self._entries)
+            self.ingest(batch, schema)
         except BaseException:
             for path, state in saved.items():
                 self._entries[path].restore(state)
             raise
+
+    def ingest(self, batch: pa.RecordBatch, schema: pa.Schema) -> None:
+        """Add a batch whose schema `schema` is known to match (unchecked; on error the
+        digester is left partly updated and must be discarded)."""
+        for i in range(batch.num_columns):
+            field = schema.field(i)
+            _visit(field, batch.column(i), field.name, None, self._entries)
         self._rows += batch.num_rows
 
     def finalize(self) -> bytes:
-        final = hashlib.sha256(header(KIND_RECORDS, self._flags))
-        final.update(self._schema_digest)
+        final = hashlib.sha256(header(KIND_RECORDS, self._analysis.flags))
+        final.update(self._analysis.digest)
         final.update(_U64.pack(self._rows))
-        _feed_entries(self._entries, final)
+        for entry in self._entries.values():  # created in node-path order
+            entry.feed(final)
         return VERSION_BYTES + final.digest()
 
 
@@ -867,19 +966,48 @@ def hash_schema(schema: pa.Schema, *, include_metadata: bool = False, ordered_co
     return VERSION_BYTES + schema_digest(schema, include_metadata, flags_of(ordered_columns, ordered_struct_fields))
 
 
+_BATCH_TYPE = "a pyarrow.RecordBatch (use hash_table for a Table)"
+_TABLE_TYPE = "a pyarrow.Table (use hash_record_batch for a RecordBatch)"
+
+
 def hash_record_batch(batch: pa.RecordBatch, **options: bool) -> bytes:
-    _require(batch, pa.RecordBatch, "hash_record_batch", "a pyarrow.RecordBatch (use hash_table for a Table)")
-    d = Digester(batch.schema, **options)
-    d.update(batch)
+    _require(batch, pa.RecordBatch, "hash_record_batch", _BATCH_TYPE)
+    schema = batch.schema
+    d = Digester.from_analysis(analyse(schema, "hash_record_batch", **options))
+    d.ingest(batch, schema)  # the batch's own schema: nothing to check
     return d.finalize()
 
 
 def hash_table(table: pa.Table, **options: bool) -> bytes:
-    _require(table, pa.Table, "hash_table", "a pyarrow.Table (use hash_record_batch for a RecordBatch)")
-    d = Digester(table.schema, **options)
-    for batch in table.to_batches():
-        d.update(batch)
+    _require(table, pa.Table, "hash_table", _TABLE_TYPE)
+    schema = table.schema
+    return _hash_table_batches(Digester.from_analysis(analyse(schema, "hash_table", **options)), table, schema)
+
+
+def _hash_table_batches(d: Digester, table: pa.Table, schema: pa.Schema) -> bytes:
+    for batch in table.to_batches():  # a table's batches carry the table's schema
+        d.ingest(batch, schema)
     return d.finalize()
+
+
+def hash_prepared_record_batch(analysis: SchemaAnalysis, batch: pa.RecordBatch) -> bytes:
+    _require(batch, pa.RecordBatch, "hash_record_batch", _BATCH_TYPE)
+    analysis.require_data_supported()
+    schema = batch.schema
+    if not analysis.matches(schema):
+        raise ValueError("Record batch schema does not match the prepared schema")
+    d = Digester.from_analysis(analysis)
+    d.ingest(batch, schema)
+    return d.finalize()
+
+
+def hash_prepared_table(analysis: SchemaAnalysis, table: pa.Table) -> bytes:
+    _require(table, pa.Table, "hash_table", _TABLE_TYPE)
+    analysis.require_data_supported()
+    schema = table.schema
+    if not analysis.matches(schema):
+        raise ValueError("Table schema does not match the prepared schema")
+    return _hash_table_batches(Digester.from_analysis(analysis), table, schema)
 
 
 def hash_array(array: pa.Array, *, ordered_columns: bool = False, ordered_struct_fields: bool = False) -> bytes:

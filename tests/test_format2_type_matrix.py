@@ -291,23 +291,33 @@ _WRAPPERS: dict[str, tuple[Callable[[pa.Array], pa.Array], Callable[[pa.Array], 
 
 def _hashes(arr: pa.Array | pa.ChunkedArray) -> dict[str, str]:
     """hash_array, the record hash (one batch, or a table of the chunks) and the record hash
-    streamed through the digester in two batches per chunk."""
+    streamed through the digester in two batches per chunk; the record hashes also through a
+    prepared schema (ITL-1177)."""
     schema = pa.schema([pa.field("c", arr.type, nullable=True)])
+    prepared = ArrowDigester.prepare(schema)
     if isinstance(arr, pa.ChunkedArray):
         chunks = arr.chunks
-        records = ArrowDigester.hash_table(pa.Table.from_arrays([arr], schema=schema))
+        table = pa.Table.from_arrays([arr], schema=schema)
+        records = ArrowDigester.hash_table(table)
+        prepared_records = prepared.hash_table(table)
     else:
         chunks = [arr]
-        records = ArrowDigester.hash_record_batch(pa.record_batch([arr], schema=schema))
+        batch = pa.record_batch([arr], schema=schema)
+        records = ArrowDigester.hash_record_batch(batch)
+        prepared_records = prepared.hash_record_batch(batch)
     digester = ArrowDigester(schema)
+    prepared_digester = prepared.digester()
     for chunk in chunks:
         k = len(chunk) // 2  # the second batch starts at a non-zero offset
         for part in (chunk.slice(0, k), chunk.slice(k)):
             digester.update(pa.record_batch([part], schema=schema))
+            prepared_digester.update(pa.record_batch([part], schema=schema))
     return {
         "hash_array": ArrowDigester.hash_array(arr).hex(),
         "records": records.hex(),
         "stream": digester.finalize().hex(),
+        "prepared_records": prepared_records.hex(),
+        "prepared_stream": prepared_digester.finalize().hex(),
     }
 
 
@@ -333,6 +343,7 @@ def test_type_matrix(leaf_type: pa.DataType, base: pa.Array, golden: str | None,
     reference = reference_wrap(base)
     expected = _hashes(reference)
     assert expected["stream"] == expected["records"], "streamed batches differ from one batch"
+    assert expected["prepared_records"] == expected["prepared_stream"] == expected["records"], "prepared differs"
     if golden is not None:
         assert expected["hash_array"] == golden, "plain array differs from the Rust golden vector"
 

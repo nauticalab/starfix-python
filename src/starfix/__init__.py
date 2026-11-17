@@ -1,3 +1,3 @@
-from starfix.arrow_digester import ArrowDigester
+from starfix.arrow_digester import ArrowDigester, PreparedSchema
 
-__all__ = ["ArrowDigester"]
+__all__ = ["ArrowDigester", "PreparedSchema"]
