@@ -252,23 +252,43 @@ def test_one_shot_calls_analyse_once(analysis_calls: dict[str, int]) -> None:
         assert analysis_calls == {"schema_nodes": 1, "phase1_json": 1, "phase2_json": 1}
 
 
+_ANALYSED_ONCE = {"schema_nodes": 1, "phase1_json": 1, "phase2_json": 1}
+_NOT_ANALYSED = {"schema_nodes": 0, "phase1_json": 0, "phase2_json": 0}
+
+
 def test_prepared_hashes_of_an_identical_schema_do_not_analyse(analysis_calls: dict[str, int]) -> None:
     table = _simple_table()
-    prepared = ArrowDigester.prepare(table.schema, include_metadata=True)
     rebuilt = pa.table(table.to_pydict(), schema=_simple_table().schema)  # equal schema, other objects
+    batch = rebuilt.to_batches()[0]
+    prepared = ArrowDigester.prepare(table.schema, include_metadata=True)
+    assert analysis_calls == _ANALYSED_ONCE  # the counters see the analysis (else the zeros below are vacuous)
     for name in analysis_calls:
         analysis_calls[name] = 0
-    prepared.hash_table(table)
-    prepared.hash_table(rebuilt)
-    prepared.hash_record_batch(rebuilt.to_batches()[0])
-    d = prepared.digester()
-    d.update(rebuilt.to_batches()[0])
-    d.finalize()
+    # From here on the counts accumulate and are never reset: every prepared operation is checked.
+    digesters: list[ArrowDigester] = []
+    for operation, call in (
+        ("digester", lambda: digesters.append(prepared.digester())),
+        ("digester().update", lambda: digesters[0].update(batch)),
+        ("digester().finalize", lambda: digesters[0].finalize()),
+        ("hash_table", lambda: prepared.hash_table(table)),
+        ("hash_table of an equal schema", lambda: prepared.hash_table(rebuilt)),
+        ("hash_record_batch", lambda: prepared.hash_record_batch(batch)),
+        ("schema_digest", lambda: prepared.schema_digest),
+    ):
+        call()
+        assert analysis_calls == _NOT_ANALYSED, f"prepared {operation} analysed the schema"
+
+
+def test_streaming_update_of_an_identical_schema_does_not_analyse(analysis_calls: dict[str, int]) -> None:
+    table = _simple_table()
+    batch = pa.table(table.to_pydict(), schema=_simple_table().schema).to_batches()[0]
     streaming = ArrowDigester(table.schema, include_metadata=True)
+    assert analysis_calls == _ANALYSED_ONCE  # the constructor analyses, once
     for name in analysis_calls:
         analysis_calls[name] = 0
-    streaming.update(rebuilt.to_batches()[0])
-    assert analysis_calls == {"schema_nodes": 0, "phase1_json": 0, "phase2_json": 0}
+    streaming.update(batch)
+    streaming.update(batch)
+    assert analysis_calls == _NOT_ANALYSED
 
 
 # ---------------------------------------------------------------------------
