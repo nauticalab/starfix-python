@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+No hash changes: every hash is byte-identical to 0.5.0 (hash format 2), for every input and
+option combination.
+
+### Added — prepared schemas (ITL-1177)
+
+- `ArrowDigester.prepare(schema, *, include_metadata=False, ordered_columns=False,
+  ordered_struct_fields=False)` analyses a schema once and returns a `PreparedSchema`
+  (exported from `starfix`), with `schema_digest` (equal to `hash_schema`),
+  `hash_record_batch(batch)`, `hash_table(table)` and `digester()` (a fresh streaming
+  `ArrowDigester`). Its hashes equal the one-shot calls; hashing a one-row table of a
+  six-column schema takes about 35 µs instead of about 150 µs (0.5.0, without
+  `include_metadata`; about 530 µs with it). See the README section "Hashing many inputs of
+  one schema" and `scripts/bench_prepared.py`.
+- A `PreparedSchema` is immutable and owned by the caller; starfix keeps no cache. A table or
+  batch is accepted exactly when its schema hashes like the prepared one under the prepared
+  options (the rule streamed batches already follow); otherwise `ValueError`. Identical
+  schemas are recognized by comparing their Arrow IPC serialization (about 1.5 µs).
+- `scripts/release_differential.py` (and a CI job): this checkout, one-shot and prepared,
+  against the released `starfix==0.5.0`, under all option combinations.
+
+### Changed — performance
+
+- One-shot calls (`hash_table`, `hash_record_batch`, `ArrowDigester(...)`) analyse the
+  schema once instead of three times (plus once per streamed batch): a one-row `hash_table`
+  takes about 85 µs instead of about 150 µs (about 175 µs instead of about 530 µs with
+  `include_metadata`).
+- `ArrowDigester.update` checks a batch whose schema is identical to the digester's in about
+  1.5 µs instead of re-analysing it.
+
 ## 0.5.0 (2026-11-11)
 
 ### Changed — hash format 2 (every hash changes)

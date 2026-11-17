@@ -55,11 +55,48 @@ ArrowDigester.hash_record_batch(table.to_batches()[0])
 ArrowDigester.hash_array(pa.array([1, 2, 3], pa.int32()))
 ```
 
+### Hashing many inputs of one schema
+
+Every call above first analyses the schema (walks its nodes, builds its canonical text and
+digest). To hash many small tables or batches of one schema, analyse it once:
+
+```python
+prepared = ArrowDigester.prepare(schema, include_metadata=False)  # options as below
+
+for row_table in tables_of_this_schema:
+    key = prepared.hash_table(row_table)    # == ArrowDigester.hash_table(row_table)
+prepared.hash_record_batch(batch)            # == ArrowDigester.hash_record_batch(batch)
+prepared.schema_digest                       # == ArrowDigester.hash_schema(schema)
+digester = prepared.digester()               # a fresh streaming ArrowDigester
+```
+
+- Every hash equals the one-shot call with the same options, byte for byte.
+- A `PreparedSchema` is immutable and belongs to the caller: starfix keeps no cache or other
+  state between calls. It can be shared between threads and pickled (it is prepared again when
+  loaded).
+- **Same-schema rule.** A table or batch is accepted exactly when its schema hashes like the
+  prepared one under the prepared options (`hash_schema(its_schema, **options) ==
+  prepared.schema_digest`): the same column names, logical types and nullability at every
+  depth, the same column order with `ordered_columns`, the same struct field order with
+  `ordered_struct_fields`, and with `include_metadata` the same field metadata at every node,
+  schema metadata and extension types. It is the rule `update` applies to streamed batches.
+  Anything else raises `ValueError` ("Table schema does not match the prepared schema" /
+  "Record batch schema does not match the prepared schema"); nothing is ever hashed with
+  another schema's analysis.
+- The check costs about 1.5 µs when the input's schema is identical to the prepared one (equal
+  Arrow IPC serialization, compared as bytes). Any other accepted schema (for example `string`
+  data for a prepared `large_string` column, or metadata that differs while `include_metadata`
+  is off) is checked by computing its canonical schema text, as expensive as a one-shot call's
+  analysis.
+- `prepare` raises what `hash_schema` raises. A schema whose data cannot be hashed (see
+  [Rejected inputs](#rejected-inputs)) still prepares, for its `schema_digest`; hashing data
+  with it raises `ValueError`.
+
 ## Options
 
 Keyword-only, all `False` by default, the same names as the Rust `HasherConfig` fields, accepted by
-`ArrowDigester(...)`, `hash_schema`, `hash_record_batch`, `hash_table` and `hash_array`
-(`hash_array` has no `include_metadata`).
+`ArrowDigester(...)`, `ArrowDigester.prepare`, `hash_schema`, `hash_record_batch`, `hash_table` and
+`hash_array` (`hash_array` has no `include_metadata`).
 
 | Option | Effect |
 |---|---|
@@ -132,7 +169,8 @@ rebuilds the type from them, so starfix-python hashes what pyarrow can observe:
 - a non-nullable field holding a null that no enclosing struct null explains;
 - with `include_metadata`: a duplicate metadata key on a field or the schema, or explicit
   `ARROW:extension:*` keys that conflict with the field's registered extension type;
-- streaming: a batch whose schema differs from the digester's. Physically different but
+- streaming, and hashing through a prepared schema: a batch or table whose schema differs from
+  the digester's or the prepared one (see the same-schema rule above). Physically different but
   equivalent types (`Utf8`/`LargeUtf8`, `Binary`/`LargeBinary`, `List`/`LargeList`, dictionary
   and plain values) are accepted; reordered columns or struct fields are accepted unless the
   matching order option is on.
@@ -158,8 +196,10 @@ are materialized (decoded with `take`) before they are traversed. A fixed-size l
 without null slots is hashed from one zero-copy slice of its child; with null slots, its items
 are selected in chunks of about one million items. Fixed-width, Boolean and list columns hash at tens of millions of rows per second.
 String and binary columns hash at about 3 to 5 million rows per second, because each value is
-visited in Python. Each `update` call also costs a few microseconds per column, to check the
-batch's schema. starfix-python is a pure-Python implementation; the Rust crate is faster on
+visited in Python. Each call also analyses the schema, which dominates for small inputs (tens to
+hundreds of microseconds, more with `include_metadata`); `ArrowDigester.prepare` does it once
+for many inputs. A streamed batch whose schema is identical to the digester's is checked in
+about 1.5 µs; `scripts/bench_prepared.py` measures both paths. starfix-python is a pure-Python implementation; the Rust crate is faster on
 string-heavy data.
 
 ## Hash format
